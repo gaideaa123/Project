@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 import app as core
+import session_gui
 import tiktok_login
 import web_uploader
 
@@ -124,7 +125,7 @@ class TurkceAnaPencere(core.MainWindow):
 
     def azure_web_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
-        note = QLabel("Profil seç: Azure GPT başlık üretir, kayıtlı TikTok oturumuyla web yükleyiciyi açar. CAPTCHA/2FA çıkarsa tarayıcıda sen tamamlarsın.")
+        note = QLabel("Profil seç: Session ID ile TikTok hesabını aç, Azure GPT başlığı üret ve web yükleyiciyle paylaş. CAPTCHA/2FA çıkarsa tarayıcıda tamamla.")
         note.setWordWrap(True); layout.addWidget(note)
         settings = QFormLayout()
         self.azure_key = QLineEdit(secret("api_key")); self.azure_key.setEchoMode(QLineEdit.Password)
@@ -236,6 +237,9 @@ class TurkceAnaPencere(core.MainWindow):
     def closeEvent(self, event):
         if self.publish_worker: self.publish_worker.cancel(); self.publish_worker.wait(5000)
         super().closeEvent(event)
+
+
+session_gui.install(TurkceAnaPencere)
 
 
 def main():
