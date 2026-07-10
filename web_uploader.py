@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-"""Visible TikTok Studio upload assistant with explicit user confirmation."""
+"""Visible TikTok Studio uploader. Login, CAPTCHA, 2FA and final approval stay with the user."""
 
 import argparse
 import json
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,13 +15,8 @@ from typing import Iterable
 
 from platformdirs import user_data_dir
 from playwright.sync_api import (
-    BrowserContext,
-    Error as PlaywrightError,
-    Locator,
-    Page,
-    Playwright,
-    TimeoutError as PlaywrightTimeout,
-    sync_playwright,
+    BrowserContext, Error as PlaywrightError, Locator, Page, Playwright,
+    TimeoutError as PlaywrightTimeout, sync_playwright,
 )
 
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
@@ -173,11 +169,8 @@ def save_diagnostics(page: Page, profile: str, error: Exception) -> Path:
     except PlaywrightError:
         pass
     (folder / "error.json").write_text(json.dumps({
-        "profile": profile,
-        "url": page.url,
-        "error_type": type(error).__name__,
-        "error": str(error),
-        "time": datetime.now(timezone.utc).isoformat(),
+        "profile": profile, "url": page.url, "error_type": type(error).__name__,
+        "error": str(error), "time": datetime.now(timezone.utc).isoformat(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return folder
 
@@ -185,10 +178,8 @@ def save_diagnostics(page: Page, profile: str, error: Exception) -> Path:
 def launch_context(playwright: Playwright, profile: str) -> BrowserContext:
     profile_dir = DATA_ROOT / "profiles" / safe_profile_name(profile)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    options = dict(
-        user_data_dir=str(profile_dir), headless=False, viewport=None,
-        no_viewport=True, args=["--start-maximized"],
-    )
+    options = dict(user_data_dir=str(profile_dir), headless=False, viewport=None,
+                   no_viewport=True, args=["--start-maximized"])
     try:
         return playwright.chromium.launch_persistent_context(channel="chrome", **options)
     except PlaywrightError as chrome_error:
@@ -196,8 +187,7 @@ def launch_context(playwright: Playwright, profile: str) -> BrowserContext:
             return playwright.chromium.launch_persistent_context(**options)
         except PlaywrightError as bundled_error:
             raise UploadError(
-                "Chrome ve Playwright Chromium açılamadı. "
-                "`playwright install chromium` komutunu çalıştırın. "
+                "Chrome ve Playwright Chromium açılamadı. `playwright install chromium` çalıştırın. "
                 f"Chrome: {chrome_error}; Chromium: {bundled_error}"
             ) from bundled_error
 
@@ -219,7 +209,11 @@ def wait_for_publish_result(page: Page, timeout_seconds: int = 120) -> None:
     raise UploadError("Yayın sonucu iki dakika içinde doğrulanamadı")
 
 
-def prepare_upload(request: UploadRequest, publish: bool = False) -> None:
+def prepare_upload(
+    request: UploadRequest,
+    publish: bool = False,
+    approval: Callable[[], bool] | None = None,
+) -> None:
     request.validate()
     with sync_playwright() as playwright:
         context = launch_context(playwright, request.profile)
@@ -232,14 +226,16 @@ def prepare_upload(request: UploadRequest, publish: bool = False) -> None:
             button = wait_until_ready(page)
             page.bring_to_front()
             if publish:
-                answer = input(f"Tarayıcı önizlemesini kontrol edin. Yayınlamak için {CONFIRMATION} yazın: ").strip()
-                if answer != CONFIRMATION:
+                approved = approval() if approval else (
+                    input(f"Önizlemeyi kontrol edin. Yayınlamak için {CONFIRMATION} yazın: ").strip()
+                    == CONFIRMATION
+                )
+                if not approved:
                     raise UploadError("Yayın kullanıcı tarafından iptal edildi")
                 button.click()
                 wait_for_publish_result(page)
-                print("BAŞARILI: TikTok yayın kabulünü doğruladı.")
             else:
-                print("HAZIR: Video ve caption dolduruldu. Son kontrol ve Yayınla işlemi tarayıcıda sizde.")
+                print("HAZIR: Video ve caption dolduruldu. Son yayın işlemi tarayıcıda sizde.")
                 while context.pages:
                     page.wait_for_timeout(1000)
         except Exception as exc:
@@ -256,7 +252,7 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--caption")
     group.add_argument("--caption-file", type=Path)
-    parser.add_argument("--publish", action="store_true", help="Açık metin onayından sonra Yayınla düğmesine bas")
+    parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
     try:
         caption = args.caption if args.caption is not None else args.caption_file.read_text(encoding="utf-8-sig")
