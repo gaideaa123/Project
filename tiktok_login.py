@@ -9,21 +9,10 @@ from typing import Any
 import keyring
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
+import copyright_dialog
+
 SERVICE = "signaldesk-tiktok-web-login"
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
-COPYRIGHT_WARNING = re.compile(
-    r"copyright check.*(?:not|hasn't|has not).*finished|"
-    r"copyright check.*in progress|"
-    r"telif hakkı.*(?:henüz )?bitmedi|"
-    r"telif.*kontrol.*(?:tamamlanmadı|devam ediyor)",
-    re.I,
-)
-COPYRIGHT_PUBLISH = re.compile(
-    r"^(publish|post|share|publish now|post now|share now|"
-    r"publish anyway|post anyway|share anyway|continue|"
-    r"yayınla|paylaş|şimdi yayınla|şimdi paylaş|yine de yayınla|yine de paylaş|devam et)$",
-    re.I,
-)
 
 
 class LoginError(RuntimeError):
@@ -145,37 +134,8 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
     raise LoginError("TikTok session/giriş doğrulaması tamamlanmadı")
 
 
-def handle_copyright_publish_dialog(page, timeout_seconds: float = 12.0) -> bool:
-    """Click the explicit publish action in TikTok's copyright-check warning dialog."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        dialogs = page.get_by_role("dialog")
-        try:
-            count = min(dialogs.count(), 5)
-        except PlaywrightError:
-            count = 0
-        for index in range(count):
-            dialog = dialogs.nth(index)
-            try:
-                if not dialog.is_visible(timeout=200):
-                    continue
-                text = dialog.inner_text(timeout=1000)
-                if not COPYRIGHT_WARNING.search(text):
-                    continue
-                buttons = dialog.get_by_role("button", name=COPYRIGHT_PUBLISH)
-                if buttons.count() and buttons.first.is_visible(timeout=400):
-                    buttons.first.click(timeout=5000)
-                    return True
-                # Fallback remains inside the verified copyright dialog only.
-                fallback = dialog.locator("button").filter(has_text=COPYRIGHT_PUBLISH)
-                if fallback.count() and fallback.first.is_visible(timeout=400):
-                    fallback.first.click(timeout=5000)
-                    return True
-                raise LoginError("Telif kontrolü uyarısı görüldü ama Paylaş düğmesi bulunamadı")
-            except PlaywrightTimeout:
-                continue
-        page.wait_for_timeout(200)
-    return False
+def handle_copyright_publish_dialog(page, timeout_seconds: float = 15.0) -> bool:
+    return copyright_dialog.handle(page, timeout_seconds)
 
 
 def install(web_uploader: Any):
