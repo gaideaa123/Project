@@ -7,11 +7,10 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
 
 import ffmpeg
 import keyring
-from PySide6.QtCore import QLocale
+from PySide6.QtCore import QLocale, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
@@ -45,80 +44,99 @@ def ayarlari_yukle() -> None:
             os.environ[name] = value
 
 
-class OneClickVariantEngine:
-    def __init__(self, registry: Any, logger: Any):
-        self.registry = registry
-        self.logger = logger
+def video_bilgisi(path: Path) -> tuple[float, bool]:
+    data = ffmpeg.probe(str(path))
+    duration = float(data.get("format", {}).get("duration") or 0)
+    has_audio = any(stream.get("codec_type") == "audio" for stream in data.get("streams", []))
+    if duration <= 0:
+        raise RuntimeError(f"Video süresi okunamadı: {path.name}")
+    return duration, has_audio
 
-    @staticmethod
-    def probe(path: Path) -> tuple[float, bool]:
-        data = ffmpeg.probe(str(path))
-        duration = float(data.get("format", {}).get("duration") or 0)
-        audio = any(stream.get("codec_type") == "audio" for stream in data.get("streams", []))
-        if duration <= 0:
-            raise RuntimeError(f"Video süresi okunamadı: {path.name}")
-        return duration, audio
 
-    def render(self, source: Path, output: Path, count: int, signals: Any) -> list[str]:
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            raise RuntimeError("FFmpeg ve FFprobe PATH üzerinde bulunamadı")
-        if not source.is_file() or source.suffix.lower() not in MEDIA_EXTENSIONS:
-            raise RuntimeError("Geçerli bir input video seçin")
+def varyant_uret(source: Path, output: Path, count: int, progress, status) -> list[str]:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("FFmpeg ve FFprobe PATH üzerinde bulunamadı")
+    if not source.is_file() or source.suffix.lower() not in MEDIA_EXTENSIONS:
+        raise RuntimeError("Geçerli bir input video seçin")
 
-        output.mkdir(parents=True, exist_ok=True)
-        duration, has_audio = self.probe(source)
-        rng = random.SystemRandom()
-        results: list[str] = []
+    output.mkdir(parents=True, exist_ok=True)
+    duration, has_audio = video_bilgisi(source)
+    rng = random.SystemRandom()
+    results: list[str] = []
 
-        for index in range(count):
-            speed = rng.uniform(0.985, 1.018)
-            zoom = rng.uniform(1.006, 1.035)
-            saturation = rng.uniform(0.97, 1.06)
-            contrast = rng.uniform(0.985, 1.04)
-            brightness = rng.uniform(-0.012, 0.012)
-            trim = min(rng.uniform(0.0, 0.16), max(0.0, duration - 1.0))
-            flip = rng.choice((False, False, False, True))
-            target = output / f"{source.stem}-variant-{index + 1:03d}-{uuid.uuid4().hex[:7]}.mp4"
+    for index in range(count):
+        speed = rng.uniform(0.985, 1.018)
+        zoom = rng.uniform(1.006, 1.035)
+        saturation = rng.uniform(0.97, 1.06)
+        contrast = rng.uniform(0.985, 1.04)
+        brightness = rng.uniform(-0.012, 0.012)
+        trim = min(rng.uniform(0.0, 0.16), max(0.0, duration - 1.0))
+        flip = rng.choice((False, False, False, True))
+        target = output / f"{source.stem}-variant-{index + 1:03d}-{uuid.uuid4().hex[:7]}.mp4"
 
-            filters = [
-                f"setpts=PTS/{speed:.6f}",
-                "scale=1080:1920:force_original_aspect_ratio=increase",
-                f"scale=iw*{zoom:.6f}:ih*{zoom:.6f}",
-                "crop=1080:1920",
-                f"eq=saturation={saturation:.6f}:contrast={contrast:.6f}:brightness={brightness:.6f}",
-                "unsharp=5:5:0.22:3:3:0.0",
-            ]
-            if flip:
-                filters.append("hflip")
-            filters.append("format=yuv420p")
+        filters = [
+            f"setpts=PTS/{speed:.6f}",
+            "scale=1080:1920:force_original_aspect_ratio=increase",
+            f"scale=iw*{zoom:.6f}:ih*{zoom:.6f}",
+            "crop=1080:1920",
+            f"eq=saturation={saturation:.6f}:contrast={contrast:.6f}:brightness={brightness:.6f}",
+            "unsharp=5:5:0.22:3:3:0.0",
+        ]
+        if flip:
+            filters.append("hflip")
+        filters.append("format=yuv420p")
 
-            command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", f"{trim:.3f}", "-i", str(source),
-                "-map", "0:v:0", "-map", "0:a:0?", "-vf", ",".join(filters),
-            ]
-            if has_audio:
-                command += ["-af", f"atempo={speed:.6f},loudnorm=I=-14:TP=-1.5:LRA=11"]
-            command += [
-                "-c:v", "libx264", "-preset", "medium", "-crf", "21",
-                "-profile:v", "high", "-level", "4.1", "-c:a", "aac",
-                "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
-                "-map_metadata", "-1", str(target),
-            ]
-            signals.log.emit(f"{index + 1}/{count}: {target.name}")
-            completed = subprocess.run(command, capture_output=True, text=True)
-            if completed.returncode:
-                raise RuntimeError(completed.stderr.strip() or "FFmpeg üretimi başarısız")
-            results.append(str(target.resolve()))
-            signals.progress.emit(round((index + 1) * 100 / count))
-        return results
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{trim:.3f}", "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0?", "-vf", ",".join(filters),
+        ]
+        if has_audio:
+            command += ["-af", f"atempo={speed:.6f},loudnorm=I=-14:TP=-1.5:LRA=11"]
+        command += [
+            "-c:v", "libx264", "-preset", "medium", "-crf", "21",
+            "-profile:v", "high", "-level", "4.1", "-c:a", "aac",
+            "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
+            "-map_metadata", "-1", str(target),
+        ]
+
+        status(f"{index + 1}/{count}: {target.name}")
+        completed = subprocess.run(command, capture_output=True, text=True)
+        if completed.returncode:
+            raise RuntimeError(completed.stderr.strip() or "FFmpeg üretimi başarısız")
+        results.append(str(target.resolve()))
+        progress(round((index + 1) * 100 / count))
+    return results
+
+
+class RenderWorker(QThread):
+    progress = Signal(int)
+    status = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, source: Path, output: Path, count: int, parent=None):
+        super().__init__(parent)
+        self.source = source
+        self.output = output
+        self.count = count
+
+    def run(self) -> None:
+        try:
+            results = varyant_uret(
+                self.source, self.output, self.count,
+                self.progress.emit, self.status.emit,
+            )
+            self.completed.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class TurkceAnaPencere(core.MainWindow):
     def build_ui(self) -> None:
         super().build_ui()
         self.setWindowTitle("SignalDesk Tek Tık Video")
-        self.variant_engine = OneClickVariantEngine(self.registry, self.logger)
+        self.render_worker: RenderWorker | None = None
         self.tabs.insertTab(1, self._one_click_tab(), "Tek Tık Video")
         self.tabs.addTab(self._api_tab(), "API Ayarları")
 
@@ -166,6 +184,8 @@ class TurkceAnaPencere(core.MainWindow):
         layout.addWidget(self.render_button)
         self.progress = QProgressBar()
         layout.addWidget(self.progress)
+        self.status_label = QLabel("Hazır")
+        layout.addWidget(self.status_label)
         outer.addWidget(panel)
         outer.addStretch()
         return page
@@ -187,6 +207,8 @@ class TurkceAnaPencere(core.MainWindow):
             self.output_dir.setText(str(Path(selected).resolve()))
 
     def start_batch(self) -> None:
+        if self.render_worker is not None and self.render_worker.isRunning():
+            return
         source = Path(self.master.text().strip())
         if not source.is_file():
             QMessageBox.warning(self, "Input bulunamadı", "Geçerli bir video seçin")
@@ -195,29 +217,37 @@ class TurkceAnaPencere(core.MainWindow):
         self.output_dir.setText(str(output.resolve()))
         self.render_button.setEnabled(False)
         self.progress.setValue(0)
-        task = core.BackgroundTask(
-            lambda signals: self.variant_engine.render(source, output, self.batch_size.value(), signals)
-        )
-        task.signals.log.connect(self.log)
-        task.signals.progress.connect(self.progress.setValue)
-        task.signals.result.connect(self._variant_done)
-        task.signals.error.connect(lambda detail: QMessageBox.critical(self, "Üretim başarısız", detail))
-        task.signals.finished.connect(lambda current=task: self._variant_finished(current))
-        self.tasks.add(task)
-        task.start()
+        self.status_label.setText("Başlatılıyor...")
+
+        worker = RenderWorker(source, output, self.batch_size.value(), self)
+        self.render_worker = worker
+        worker.progress.connect(self.progress.setValue)
+        worker.status.connect(self.status_label.setText)
+        worker.completed.connect(self._variant_done)
+        worker.failed.connect(self._variant_failed)
+        worker.finished.connect(self._variant_finished)
+        worker.start()
 
     def start_render(self) -> None:
         self.start_batch()
 
     def _variant_done(self, outputs: object) -> None:
         self.last_outputs = list(outputs or [])
+        self.status_label.setText(f"{len(self.last_outputs)} varyant hazır")
         QMessageBox.information(
             self, "Hazır", f"{len(self.last_outputs)} varyant oluşturuldu.\n{self.output_dir.text()}"
         )
 
-    def _variant_finished(self, task: object) -> None:
-        self.tasks.discard(task)
+    def _variant_failed(self, message: str) -> None:
+        self.status_label.setText("Hata")
+        QMessageBox.critical(self, "Üretim başarısız", message)
+
+    def _variant_finished(self) -> None:
         self.render_button.setEnabled(True)
+        worker = self.render_worker
+        self.render_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _api_tab(self) -> QWidget:
         page = QWidget()
@@ -261,14 +291,14 @@ class TurkceAnaPencere(core.MainWindow):
 
 def main() -> int:
     ayarlari_yukle()
-    app = QApplication(sys.argv)
-    app.setApplicationName("SignalDesk Tek Tık Video")
-    app.setOrganizationName("SignalDesk")
-    app.setStyle("Fusion")
+    qt = QApplication(sys.argv)
+    qt.setApplicationName("SignalDesk Tek Tık Video")
+    qt.setOrganizationName("SignalDesk")
+    qt.setStyle("Fusion")
     QLocale.setDefault(QLocale(QLocale.Turkish, QLocale.Turkey))
     window = TurkceAnaPencere()
     window.show()
-    return app.exec()
+    return qt.exec()
 
 
 if __name__ == "__main__":
