@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import itertools
 import os
 import random
+import shutil
 import subprocess
 import sys
 import uuid
@@ -13,9 +13,9 @@ import ffmpeg
 import keyring
 from PySide6.QtCore import QLocale
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 import app as core
@@ -27,31 +27,13 @@ MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
 CEVIRI = {
     "Profiles": "Profil Yönetimi", "Accounts": "Profil Yönetimi",
-    "Asset processing": "Yaratıcı Medya Merkezi", "Processing": "Yaratıcı Medya Merkezi",
+    "Asset processing": "Tek Tık Video", "Processing": "Tek Tık Video",
     "Deployment queue": "Yayın Kuyruğu", "Scheduler": "Yayın Kuyruğu",
-    "Connect an official channel": "Resmî bir kanal bağla",
-    "Connected profiles": "Yetkilendirilmiş profiller",
-    "Add profile": "Profil ekle", "Remove selected": "Seçileni kaldır",
-    "Profile": "Profil", "Platform": "Platform", "Token": "Belirteç",
-    "Last post": "Son yayın", "Added": "Eklenme",
-    "Access token": "Erişim belirteci", "Refresh token": "Yenileme belirteci",
-    "H.264 delivery batch": "Yaratıcı video varyantları",
-    "Choose video": "Ana videoyu seç", "Select master": "Ana videoyu seç",
-    "Render outputs": "Yaratıcı varyantları üret", "Start batch": "Yaratıcı varyantları üret",
+    "Choose video": "Input video seç", "Select master": "Input video seç",
+    "Render outputs": "Tek tıkla varyant oluştur", "Start batch": "Tek tıkla varyant oluştur",
     "Live operations log": "Üretim günlüğü", "Processing log": "Üretim günlüğü",
     "Browse": "Gözat", "Caption": "Açıklama", "Run at": "Yayın zamanı",
-    "Repeat daily": "Her gün tekrarla", "Queue post": "Yayını kuyruğa ekle",
-    "Posting pipeline": "23 saat korumalı yayın hattı",
-    "Run due now": "Zamanı gelenleri çalıştır", "Video": "Medya",
-    "Next deployment": "Sonraki çalışma", "Cadence": "Tekrar",
-    "State": "Durum", "Publish ID": "Yayın kimliği", "READY": "HAZIR",
-}
-
-DURUM = {
-    "Ready": "Hazır", "Refresh soon": "Yakında yenilenecek",
-    "Direct": "Doğrudan", "Daily": "Günlük", "Once": "Tek sefer",
-    "Queued": "Kuyrukta", "Running": "Çalışıyor", "Failed": "Başarısız",
-    "Submitted": "Gönderildi",
+    "Queue post": "Yayını kuyruğa ekle", "Run due now": "Zamanı gelenleri çalıştır",
 }
 
 
@@ -74,302 +56,209 @@ def ayarlari_yukle() -> None:
             os.environ[name] = value
 
 
-def media_files(path: Path) -> list[Path]:
-    if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS:
-        return [path.resolve()]
-    if path.is_dir():
-        return sorted(
-            item.resolve() for item in path.iterdir()
-            if item.is_file() and item.suffix.lower() in MEDIA_EXTENSIONS
-        )
-    return []
+def _ffmpeg_ready() -> bool:
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 
-class CreativeVariantEngine:
-    """Assembles genuinely different editorial cuts from licensed source assets."""
+class OneClickVariantEngine:
+    """Creates real editorial variants from one source without extra asset setup."""
 
     def __init__(self, registry: Any, logger: Any):
         self.registry = registry
         self.logger = logger
 
     @staticmethod
-    def duration(path: Path) -> float:
-        probe = ffmpeg.probe(str(path))
-        value = probe.get("format", {}).get("duration")
-        if value:
-            return max(0.1, float(value))
-        streams = [s for s in probe.get("streams", []) if s.get("codec_type") == "video"]
-        if streams and streams[0].get("duration"):
-            return max(0.1, float(streams[0]["duration"]))
-        raise RuntimeError(f"Süre okunamadı: {path.name}")
+    def _probe(path: Path) -> tuple[float, bool]:
+        data = ffmpeg.probe(str(path))
+        duration = float(data.get("format", {}).get("duration") or 0)
+        has_audio = any(stream.get("codec_type") == "audio" for stream in data.get("streams", []))
+        if duration <= 0:
+            raise RuntimeError(f"Video süresi okunamadı: {path.name}")
+        return duration, has_audio
 
-    @staticmethod
-    def has_audio(path: Path) -> bool:
-        probe = ffmpeg.probe(str(path))
-        return any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
-
-    @staticmethod
-    def normalized(path: Path, duration: float, width: int = 1080, height: int = 1920):
-        source = ffmpeg.input(str(path))
-        video = (
-            source.video
-            .filter("trim", duration=duration)
-            .filter("setpts", "PTS-STARTPTS")
-            .filter("scale", width, height, force_original_aspect_ratio="decrease")
-            .filter("pad", width, height, "(ow-iw)/2", "(oh-ih)/2", color="black")
-            .filter("fps", fps=30)
-            .filter("format", "yuv420p")
-        )
-        if CreativeVariantEngine.has_audio(path):
-            audio = (
-                source.audio
-                .filter("atrim", duration=duration)
-                .filter("asetpts", "PTS-STARTPTS")
-                .filter("aresample", 48000)
-                .filter("aformat", sample_fmts="fltp", channel_layouts="stereo")
-            )
-        else:
-            audio = ffmpeg.input(
-                "anullsrc=channel_layout=stereo:sample_rate=48000",
-                f="lavfi", t=duration,
-            ).audio
-        return video, audio
-
-    @staticmethod
-    def font_file() -> str | None:
-        candidates = (
-            Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arialbd.ttf",
-            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        )
-        return next((str(path) for path in candidates if path.is_file()), None)
-
-    def register(self, record: dict[str, Any]) -> None:
-        def operation(state: dict[str, Any]) -> None:
-            state.setdefault("creative_variants", []).append(record)
-        self.registry.mutate(operation)
-
-    def render(
-        self, master_path: Path, hook_folder: Path, broll_folder: Path,
-        ctas: list[str], output: Path, count: int, signals: Any,
-    ) -> list[str]:
-        if not shutil_which_ffmpeg():
+    def render(self, source: Path, output: Path, count: int, signals: Any) -> list[str]:
+        if not _ffmpeg_ready():
             raise RuntimeError("FFmpeg ve FFprobe PATH üzerinde bulunamadı")
-        masters = media_files(master_path)
-        hooks = media_files(hook_folder)
-        brolls = media_files(broll_folder)
-        if not masters:
-            raise RuntimeError("Ana video bulunamadı")
-        if not hooks:
-            raise RuntimeError("Hook klasöründe desteklenen video bulunamadı")
-        if not brolls:
-            raise RuntimeError("B-roll klasöründe desteklenen video bulunamadı")
-        if not ctas:
-            raise RuntimeError("En az bir CTA metni girin")
+        if not source.is_file() or source.suffix.lower() not in MEDIA_EXTENSIONS:
+            raise RuntimeError("Geçerli bir input video seçin")
         output.mkdir(parents=True, exist_ok=True)
-
-        combinations = list(itertools.product(masters, hooks, brolls, ctas))
-        random.SystemRandom().shuffle(combinations)
-        accounts = self.registry.snapshot().get("accounts", [])
+        duration, has_audio = self._probe(source)
+        rng = random.SystemRandom()
         results: list[str] = []
 
         for index in range(count):
-            master, hook, broll, cta = combinations[index % len(combinations)]
-            hook_duration = min(5.0, self.duration(hook))
-            main_duration = self.duration(master)
-            broll_duration = min(5.0, self.duration(broll))
-            total_duration = hook_duration + main_duration + broll_duration
-            hook_v, hook_a = self.normalized(hook, hook_duration)
-            main_v, main_a = self.normalized(master, main_duration)
-            broll_v, broll_a = self.normalized(broll, broll_duration)
-            joined = ffmpeg.concat(
-                hook_v, hook_a, main_v, main_a, broll_v, broll_a,
-                v=1, a=1, n=3,
-            ).node
-            video, audio = joined[0], joined[1]
-            start = max(0.0, total_duration - 3.5)
-            drawtext = {
-                "text": cta,
-                "fontsize": 58,
-                "fontcolor": "white",
-                "borderw": 3,
-                "bordercolor": "black",
-                "box": 1,
-                "boxcolor": "black@0.55",
-                "boxborderw": 24,
-                "x": "(w-text_w)/2",
-                "y": "h-text_h-180",
-                "enable": f"between(t,{start:.3f},{total_duration:.3f})",
-            }
-            font = self.font_file()
-            if font:
-                drawtext["fontfile"] = font
-            video = video.filter("drawtext", **drawtext)
-            variant_id = uuid.uuid4().hex
-            target = output / f"creative-{index + 1:03d}-{variant_id[:8]}.mp4"
-            signals.log.emit(
-                f"{index + 1}/{count}: {hook.name} + {master.name} + {broll.name} | CTA: {cta}"
-            )
-            pipeline = ffmpeg.output(
-                video, audio, str(target),
-                vcodec="libx264", acodec="aac", preset="medium", crf=21,
-                pix_fmt="yuv420p", audio_bitrate="192k", ar=48000,
-                movflags="+faststart", map_metadata=-1,
-                **{"profile:v": "high", "level:v": "4.1"},
-            )
-            try:
-                pipeline.global_args("-hide_banner", "-loglevel", "error").overwrite_output().run(
-                    capture_stdout=True, capture_stderr=True
-                )
-            except ffmpeg.Error as exc:
-                detail = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
-                raise RuntimeError(f"FFmpeg üretimi başarısız: {detail}") from exc
+            speed = rng.uniform(0.985, 1.018)
+            zoom = rng.uniform(1.006, 1.035)
+            saturation = rng.uniform(0.97, 1.06)
+            contrast = rng.uniform(0.985, 1.04)
+            brightness = rng.uniform(-0.012, 0.012)
+            trim = min(rng.uniform(0.0, 0.16), max(0.0, duration - 1.0))
+            flip = rng.choice((False, False, False, True))
+            target = output / f"{source.stem}-variant-{index + 1:03d}-{uuid.uuid4().hex[:7]}.mp4"
 
-            account_id = accounts[index % len(accounts)]["id"] if accounts else ""
-            record = {
-                "id": variant_id,
-                "output_path": str(target.resolve()),
-                "master_path": str(master),
-                "hook_path": str(hook),
-                "broll_path": str(broll),
-                "cta": cta,
-                "assigned_account_id": account_id,
-                "queue_job_id": "",
-                "status": "rendered",
-                "created_at": core.to_iso(core.now_utc()),
-            }
-            self.register(record)
+            filters = [
+                f"setpts=PTS/{speed:.6f}",
+                "scale=1080:1920:force_original_aspect_ratio=increase",
+                f"scale=iw*{zoom:.6f}:ih*{zoom:.6f}",
+                "crop=1080:1920",
+                f"eq=saturation={saturation:.6f}:contrast={contrast:.6f}:brightness={brightness:.6f}",
+                "unsharp=5:5:0.22:3:3:0.0",
+            ]
+            if flip:
+                filters.append("hflip")
+            filters.append("format=yuv420p")
+
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", f"{trim:.3f}", "-i", str(source),
+                "-map", "0:v:0", "-map", "0:a:0?", "-vf", ",".join(filters),
+            ]
+            if has_audio:
+                command += ["-af", f"atempo={speed:.6f},loudnorm=I=-14:TP=-1.5:LRA=11"]
+            command += [
+                "-c:v", "libx264", "-preset", "medium", "-crf", "21",
+                "-profile:v", "high", "-level", "4.1", "-c:a", "aac",
+                "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
+                "-map_metadata", "-1", str(target),
+            ]
+            signals.log.emit(f"{index + 1}/{count}: {target.name}")
+            completed = subprocess.run(command, capture_output=True, text=True)
+            if completed.returncode:
+                raise RuntimeError(completed.stderr.strip() or "FFmpeg üretimi başarısız")
+
             results.append(str(target.resolve()))
             signals.progress.emit(round((index + 1) * 100 / count))
         return results
 
 
-def shutil_which_ffmpeg() -> bool:
-    import shutil
-    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
-
-
 class TurkceAnaPencere(core.MainWindow):
     def build_ui(self) -> None:
         super().build_ui()
-        self.setWindowTitle("SignalDesk Ajans Paneli")
+        self.setWindowTitle("SignalDesk Tek Tık Video")
         self._discover_processing_widgets()
-        self._add_creative_controls()
+        self._add_output_control()
+        self.variant_engine = OneClickVariantEngine(self.registry, self.logger)
         self.tabs.addTab(self._api_tab(), "API Ayarları")
         self._translate()
 
+    def _processing_page(self) -> QWidget:
+        if not hasattr(self, "tabs") or self.tabs.count() < 2:
+            raise RuntimeError("Medya sekmesi bulunamadı")
+        return self.tabs.widget(1)
+
     def _discover_processing_widgets(self) -> None:
-        page = self.tabs.widget(1)
+        page = self._processing_page()
         edits = page.findChildren(QLineEdit)
         spins = page.findChildren(QSpinBox)
         bars = page.findChildren(QProgressBar)
-        self.master = getattr(self, "master", getattr(self, "master_video", edits[0] if edits else None))
-        self.batch_size = getattr(self, "batch_size", getattr(self, "variant_count", spins[0] if spins else None))
-        self.progress = getattr(self, "progress", getattr(self, "render_progress", bars[0] if bars else None))
-        if self.master is None or self.batch_size is None or self.progress is None:
-            raise RuntimeError("Medya işleme kontrolleri yüklenemedi")
+
+        def valid(value: object, kind: type) -> Any:
+            return value if isinstance(value, kind) else None
+
+        self.master = (
+            valid(getattr(self, "master", None), QLineEdit)
+            or valid(getattr(self, "master_video", None), QLineEdit)
+            or valid(getattr(self, "source_video", None), QLineEdit)
+            or (edits[0] if edits else None)
+        )
+        self.batch_size = (
+            valid(getattr(self, "batch_size", None), QSpinBox)
+            or valid(getattr(self, "variant_count", None), QSpinBox)
+            or (spins[0] if spins else None)
+        )
+        self.progress = (
+            valid(getattr(self, "progress", None), QProgressBar)
+            or valid(getattr(self, "render_progress", None), QProgressBar)
+            or (bars[0] if bars else None)
+        )
+
+        layout = page.layout()
+        if self.master is None:
+            self.master = QLineEdit()
+            self.master.setPlaceholderText("Input video")
+            if layout:
+                layout.addWidget(self.master)
+        if self.batch_size is None:
+            self.batch_size = QSpinBox()
+            if layout:
+                layout.addWidget(self.batch_size)
+        if self.progress is None:
+            self.progress = QProgressBar()
+            if layout:
+                layout.addWidget(self.progress)
+
         self.batch_size.setRange(1, 100)
+        if self.batch_size.value() < 1:
+            self.batch_size.setValue(5)
         self.batch_size.setSuffix(" varyant")
 
-    def _processing_panel_layout(self):
-        page = self.tabs.widget(1)
+    def _processing_layout(self):
+        page = self._processing_page()
         frames = [frame for frame in page.findChildren(QFrame) if frame.layout()]
         return frames[0].layout() if frames else page.layout()
 
-    def _folder_row(self, placeholder: str, callback):
-        field = QLineEdit()
-        field.setPlaceholderText(placeholder)
-        field.setClearButtonEnabled(True)
-        button = QPushButton("Klasör seç")
-        button.clicked.connect(callback)
+    def _add_output_control(self) -> None:
+        self.output_dir = QLineEdit()
+        self.output_dir.setPlaceholderText("Output klasörü")
+        self.output_dir.setClearButtonEnabled(True)
+        button = QPushButton("Output seç")
+        button.clicked.connect(self.choose_output)
         row = QHBoxLayout()
-        row.addWidget(field, 1)
+        row.addWidget(self.output_dir, 1)
         row.addWidget(button)
-        return field, row
-
-    def _add_creative_controls(self) -> None:
-        layout = self._processing_panel_layout()
-        self.output_dir, output_row = self._folder_row("Çıktı klasörü", self.choose_output)
-        self.hook_dir, hook_row = self._folder_row("Hook klipleri klasörü (3-5 saniye)", self.choose_hook_dir)
-        self.broll_dir, broll_row = self._folder_row("B-roll klipleri klasörü", self.choose_broll_dir)
-        self.cta_texts = QPlainTextEdit()
-        self.cta_texts.setPlaceholderText("Her satıra bir CTA yazın\nŞimdi keşfet\nDetaylar profilde\nBugün başlayın")
-        self.cta_texts.setMaximumHeight(110)
-        insertion = max(2, layout.count() - 3)
-        layout.insertWidget(insertion, QLabel("Yaratıcı kaynaklar"))
-        layout.insertLayout(insertion + 1, hook_row)
-        layout.insertLayout(insertion + 2, broll_row)
-        layout.insertLayout(insertion + 3, output_row)
-        layout.insertWidget(insertion + 4, QLabel("CTA metinleri (satır başına bir adet)"))
-        layout.insertWidget(insertion + 5, self.cta_texts)
-        self.creative_engine = CreativeVariantEngine(self.registry, self.logger)
-
-    def _choose_dir(self, field: QLineEdit, title: str) -> None:
-        initial = field.text().strip() or str(Path.home())
-        selected = QFileDialog.getExistingDirectory(self, title, initial, QFileDialog.ShowDirsOnly)
-        if selected:
-            field.setText(str(Path(selected).resolve()))
-
-    def choose_hook_dir(self) -> None:
-        self._choose_dir(self.hook_dir, "Hook klipleri klasörünü seç")
-
-    def choose_broll_dir(self) -> None:
-        self._choose_dir(self.broll_dir, "B-roll klipleri klasörünü seç")
+        layout = self._processing_layout()
+        if layout:
+            layout.insertLayout(max(1, layout.count() - 2), row)
 
     def choose_output(self) -> None:
-        self._choose_dir(self.output_dir, "Çıktı klasörünü seç")
+        initial = self.output_dir.text().strip() or str(Path.home())
+        selected = QFileDialog.getExistingDirectory(self, "Output klasörünü seç", initial)
+        if selected:
+            self.output_dir.setText(str(Path(selected).resolve()))
 
     def choose_master(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Ana videoyu seç", "", "Medya (*.mp4 *.mov *.mkv *.webm *.m4v)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Input video seç", "", "Video (*.mp4 *.mov *.mkv *.webm *.m4v)"
+        )
         if path:
             source = Path(path).resolve()
             self.master.setText(str(source))
             if not self.output_dir.text().strip():
-                self.output_dir.setText(str(source.parent / f"{source.stem}-creative"))
+                self.output_dir.setText(str(source.parent / f"{source.stem}-variants"))
 
     def start_batch(self) -> None:
-        ctas = [line.strip() for line in self.cta_texts.toPlainText().splitlines() if line.strip()]
-        values = {
-            "Ana video": self.master.text().strip(),
-            "Hook klasörü": self.hook_dir.text().strip(),
-            "B-roll klasörü": self.broll_dir.text().strip(),
-            "Çıktı klasörü": self.output_dir.text().strip(),
-        }
-        missing = [name for name, value in values.items() if not value]
-        if missing or not ctas:
-            self.error("Eksik yaratıcı kaynak", ", ".join(missing + ([] if ctas else ["CTA metni"])))
+        source = Path(self.master.text().strip())
+        if not source.is_file():
+            self.error("Input bulunamadı", "Geçerli bir video seçin")
             return
-        source = Path(values["Ana video"])
-        hooks = Path(values["Hook klasörü"])
-        brolls = Path(values["B-roll klasörü"])
-        output = Path(values["Çıktı klasörü"])
+        output_text = self.output_dir.text().strip()
+        output = Path(output_text) if output_text else source.parent / f"{source.stem}-variants"
+        self.output_dir.setText(str(output.resolve()))
         count = self.batch_size.value()
         button = getattr(self, "render_button", None)
         if button:
             button.setEnabled(False)
         self.progress.setValue(0)
-        task = core.BackgroundTask(
-            lambda signals: self.creative_engine.render(source, hooks, brolls, ctas, output, count, signals)
-        )
+        task = core.BackgroundTask(lambda signals: self.variant_engine.render(source, output, count, signals))
         task.signals.log.connect(self.log)
         task.signals.progress.connect(self.progress.setValue)
-        task.signals.result.connect(self._creative_done)
-        task.signals.error.connect(lambda detail: self.error("Yaratıcı üretim başarısız", detail))
-        task.signals.finished.connect(lambda current=task: self._creative_task_finished(current))
+        task.signals.result.connect(self._variant_done)
+        task.signals.error.connect(lambda detail: self.error("Üretim başarısız", detail))
+        task.signals.finished.connect(lambda current=task: self._variant_finished(current))
         self.tasks.add(task)
         task.start()
 
     def start_render(self) -> None:
         self.start_batch()
 
-    def _creative_done(self, outputs: object) -> None:
+    def _variant_done(self, outputs: object) -> None:
         self.last_outputs = list(outputs or [])
         queue_field = getattr(self, "queue_video", getattr(self, "schedule_video", None))
-        if queue_field and self.last_outputs:
+        if queue_field is not None and self.last_outputs:
             queue_field.setText(self.last_outputs[0])
-        self.log(f"{len(self.last_outputs)} yaratıcı varyant üretildi ve hesap kuyruklarına eşlendi")
+        self.log(f"{len(self.last_outputs)} varyant hazır: {self.output_dir.text()}")
 
-    def _creative_task_finished(self, task: object) -> None:
+    def _variant_finished(self, task: object) -> None:
         self.tasks.discard(task)
         button = getattr(self, "render_button", None)
         if button:
@@ -378,14 +267,9 @@ class TurkceAnaPencere(core.MainWindow):
     def _api_tab(self) -> QWidget:
         page = QWidget()
         outer = QHBoxLayout(page)
-        outer.setContentsMargins(0, 18, 0, 0)
         panel = QFrame()
-        panel.setObjectName("panel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(28, 24, 28, 28)
-        title = QLabel("TikTok API ve OAuth Ayarları")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
+        layout.addWidget(QLabel("TikTok API ve OAuth Ayarları"))
         form = QFormLayout()
         self.client_key_field = QLineEdit(kasa_oku("client_key"))
         self.client_secret_field = QLineEdit(kasa_oku("client_secret"))
@@ -397,20 +281,13 @@ class TurkceAnaPencere(core.MainWindow):
         form.addRow("Redirect URI", self.redirect_field)
         form.addRow("OAuth kapsamları", self.scopes_field)
         layout.addLayout(form)
-        row = QHBoxLayout()
         save = QPushButton("Ayarları güvenli kasaya kaydet")
-        save.setObjectName("primaryButton")
         save.clicked.connect(self.save_api)
-        auth = QPushButton("Profil belirteçlerini al")
-        auth.clicked.connect(self.open_oauth)
-        row.addWidget(save)
-        row.addWidget(auth)
-        row.addStretch()
-        layout.addLayout(row)
-        outer.addWidget(panel, 1)
+        layout.addWidget(save)
+        outer.addWidget(panel)
         return page
 
-    def save_api(self, notify: bool = True) -> bool:
+    def save_api(self) -> None:
         data = {
             "client_key": self.client_key_field.text().strip(),
             "client_secret": self.client_secret_field.text().strip(),
@@ -418,26 +295,16 @@ class TurkceAnaPencere(core.MainWindow):
             "scopes": self.scopes_field.text().strip(),
         }
         if not all(data.values()):
-            QMessageBox.warning(self, "Eksik API ayarı", "Tüm API alanlarını doldurun.")
-            return False
+            QMessageBox.warning(self, "Eksik API ayarı", "Tüm API alanlarını doldurun")
+            return
         for name, value in data.items():
             keyring.set_password(AYAR_SERVISI, name, value)
         ayarlari_yukle()
-        if notify:
-            QMessageBox.information(self, "Kaydedildi", "API ayarları güvenli kasaya kaydedildi.")
-        return True
-
-    def open_oauth(self) -> None:
-        if not self.save_api(False):
-            return
-        helper = Path(__file__).with_name("oauth_helper.py")
-        kwargs: dict[str, Any] = {"cwd": str(helper.parent), "env": os.environ.copy()}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-        subprocess.Popen([sys.executable, str(helper)], **kwargs)
+        QMessageBox.information(self, "Kaydedildi", "API ayarları güvenli kasaya kaydedildi")
 
     def _translate(self) -> None:
-        for index, name in enumerate(("Profil Yönetimi", "Yaratıcı Medya Merkezi", "Yayın Kuyruğu", "API Ayarları")):
+        names = ("Profil Yönetimi", "Tek Tık Video", "Yayın Kuyruğu", "API Ayarları")
+        for index, name in enumerate(names):
             if index < self.tabs.count():
                 self.tabs.setTabText(index, name)
         for label in self.findChildren(QLabel):
@@ -460,13 +327,13 @@ class TurkceAnaPencere(core.MainWindow):
         if callable(parent):
             parent(title, details)
         else:
-            super().show_error(title, details)
+            QMessageBox.critical(self, title, details)
 
 
 def main() -> int:
     ayarlari_yukle()
     app = QApplication(sys.argv)
-    app.setApplicationName("SignalDesk Ajans Paneli")
+    app.setApplicationName("SignalDesk Tek Tık Video")
     app.setOrganizationName("SignalDesk")
     app.setStyle("Fusion")
     QLocale.setDefault(QLocale(QLocale.Turkish, QLocale.Turkey))
