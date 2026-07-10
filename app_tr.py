@@ -53,7 +53,21 @@ def video_bilgisi(path: Path) -> tuple[float, bool]:
     return duration, has_audio
 
 
+def _visual_chain(label: str, speed: float, zoom: float, saturation: float,
+                  contrast: float, brightness: float, teaser: bool = False) -> str:
+    timing = "setpts=PTS-STARTPTS" if teaser else f"setpts=(PTS-STARTPTS)/{speed:.6f}"
+    return (
+        f"[{label}:v]{timing},"
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        f"scale=iw*{zoom:.6f}:ih*{zoom:.6f},"
+        "crop=1080:1920,"
+        f"eq=saturation={saturation:.6f}:contrast={contrast:.6f}:brightness={brightness:.6f},"
+        "unsharp=5:5:0.20:3:3:0.0,format=yuv420p"
+    )
+
+
 def varyant_uret(source: Path, output: Path, count: int, progress, status) -> list[str]:
+    """Create editorial variants with an automatic teaser opening, never mirroring."""
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg ve FFprobe PATH üzerinde bulunamadı")
     if not source.is_file() or source.suffix.lower() not in MEDIA_EXTENSIONS:
@@ -65,42 +79,50 @@ def varyant_uret(source: Path, output: Path, count: int, progress, status) -> li
     results: list[str] = []
 
     for index in range(count):
-        speed = rng.uniform(0.985, 1.018)
-        zoom = rng.uniform(1.006, 1.035)
-        saturation = rng.uniform(0.97, 1.06)
-        contrast = rng.uniform(0.985, 1.04)
-        brightness = rng.uniform(-0.012, 0.012)
-        trim = min(rng.uniform(0.0, 0.16), max(0.0, duration - 1.0))
-        flip = rng.choice((False, False, False, True))
+        speed = rng.uniform(0.992, 1.012)
+        zoom = rng.uniform(1.006, 1.025)
+        saturation = rng.uniform(0.98, 1.04)
+        contrast = rng.uniform(0.99, 1.03)
+        brightness = rng.uniform(-0.008, 0.008)
+        trim = min(rng.uniform(0.0, 0.10), max(0.0, duration - 1.0))
+        teaser_duration = min(rng.uniform(0.75, 1.20), max(0.35, duration * 0.15))
+        safe_latest = max(0.0, duration - teaser_duration - 0.2)
+        teaser_start = min(duration * rng.choice((0.28, 0.42, 0.58, 0.70)), safe_latest)
         target = output / f"{source.stem}-variant-{index + 1:03d}-{uuid.uuid4().hex[:7]}.mp4"
 
-        filters = [
-            f"setpts=PTS/{speed:.6f}",
-            "scale=1080:1920:force_original_aspect_ratio=increase",
-            f"scale=iw*{zoom:.6f}:ih*{zoom:.6f}",
-            "crop=1080:1920",
-            f"eq=saturation={saturation:.6f}:contrast={contrast:.6f}:brightness={brightness:.6f}",
-            "unsharp=5:5:0.22:3:3:0.0",
+        teaser_chain = _visual_chain("0", 1.0, zoom + 0.012, saturation, contrast, brightness, True)
+        main_chain = _visual_chain("1", speed, zoom, saturation, contrast, brightness, False)
+        filter_parts = [
+            f"{teaser_chain}[teaser_v]",
+            f"{main_chain}[main_v]",
+            "[teaser_v][main_v]concat=n=2:v=1:a=0[out_v]",
         ]
-        if flip:
-            filters.append("hflip")
-        filters.append("format=yuv420p")
+        if has_audio:
+            filter_parts += [
+                "[0:a]asetpts=PTS-STARTPTS,aresample=48000[teaser_a]",
+                f"[1:a]asetpts=PTS-STARTPTS,atempo={speed:.6f},aresample=48000,"
+                "loudnorm=I=-14:TP=-1.5:LRA=11[main_a]",
+                "[teaser_a][main_a]concat=n=2:v=0:a=1[out_a]",
+            ]
 
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{teaser_start:.3f}", "-t", f"{teaser_duration:.3f}", "-i", str(source),
             "-ss", f"{trim:.3f}", "-i", str(source),
-            "-map", "0:v:0", "-map", "0:a:0?", "-vf", ",".join(filters),
+            "-filter_complex", ";".join(filter_parts),
+            "-map", "[out_v]",
         ]
         if has_audio:
-            command += ["-af", f"atempo={speed:.6f},loudnorm=I=-14:TP=-1.5:LRA=11"]
+            command += ["-map", "[out_a]"]
         command += [
             "-c:v", "libx264", "-preset", "medium", "-crf", "21",
-            "-profile:v", "high", "-level", "4.1", "-c:a", "aac",
-            "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
-            "-map_metadata", "-1", str(target),
+            "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
         ]
+        if has_audio:
+            command += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+        command += ["-movflags", "+faststart", "-map_metadata", "-1", str(target)]
 
-        status(f"{index + 1}/{count}: {target.name}")
+        status(f"{index + 1}/{count}: otomatik cold-open + ana kurgu")
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode:
             raise RuntimeError(completed.stderr.strip() or "FFmpeg üretimi başarısız")
@@ -123,11 +145,10 @@ class RenderWorker(QThread):
 
     def run(self) -> None:
         try:
-            results = varyant_uret(
+            self.completed.emit(varyant_uret(
                 self.source, self.output, self.count,
                 self.progress.emit, self.status.emit,
-            )
-            self.completed.emit(results)
+            ))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -147,6 +168,9 @@ class TurkceAnaPencere(core.MainWindow):
         title = QLabel("Input ve output seç, gerisini tek tıkla hallet")
         title.setStyleSheet("font-size: 20px; font-weight: 700")
         outer.addWidget(title)
+        note = QLabel("Aynalama yok. Her varyant otomatik teaser açılışı ve yeniden kurgulanmış tempo kullanır.")
+        note.setWordWrap(True)
+        outer.addWidget(note)
 
         panel = QFrame()
         panel.setObjectName("panel")
@@ -218,15 +242,13 @@ class TurkceAnaPencere(core.MainWindow):
         self.render_button.setEnabled(False)
         self.progress.setValue(0)
         self.status_label.setText("Başlatılıyor...")
-
-        worker = RenderWorker(source, output, self.batch_size.value(), self)
-        self.render_worker = worker
-        worker.progress.connect(self.progress.setValue)
-        worker.status.connect(self.status_label.setText)
-        worker.completed.connect(self._variant_done)
-        worker.failed.connect(self._variant_failed)
-        worker.finished.connect(self._variant_finished)
-        worker.start()
+        self.render_worker = RenderWorker(source, output, self.batch_size.value(), self)
+        self.render_worker.progress.connect(self.progress.setValue)
+        self.render_worker.status.connect(self.status_label.setText)
+        self.render_worker.completed.connect(self._variant_done)
+        self.render_worker.failed.connect(self._variant_failed)
+        self.render_worker.finished.connect(self._variant_finished)
+        self.render_worker.start()
 
     def start_render(self) -> None:
         self.start_batch()
@@ -234,9 +256,7 @@ class TurkceAnaPencere(core.MainWindow):
     def _variant_done(self, outputs: object) -> None:
         self.last_outputs = list(outputs or [])
         self.status_label.setText(f"{len(self.last_outputs)} varyant hazır")
-        QMessageBox.information(
-            self, "Hazır", f"{len(self.last_outputs)} varyant oluşturuldu.\n{self.output_dir.text()}"
-        )
+        QMessageBox.information(self, "Hazır", f"{len(self.last_outputs)} varyant oluşturuldu.\n{self.output_dir.text()}")
 
     def _variant_failed(self, message: str) -> None:
         self.status_label.setText("Hata")
