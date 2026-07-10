@@ -3,3 +3,4 @@ ffmpeg-python>=0.2.0,<1
 requests>=2.32,<3
 platformdirs>=4.3,<5
 keyring>=25.6,<26
+playwright>=1.53,<2
