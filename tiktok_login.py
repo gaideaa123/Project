@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Profile-scoped TikTok session and publish-dialog assistance."""
+"""Profile-scoped TikTok session, onboarding, and publish-dialog assistance."""
 
 import re
 import time
@@ -10,6 +10,7 @@ import keyring
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
 import copyright_dialog
+import tiktok_overlays
 
 SERVICE = "signaldesk-tiktok-web-login"
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
@@ -134,7 +135,7 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
     raise LoginError("TikTok session/giriş doğrulaması tamamlanmadı")
 
 
-def handle_copyright_publish_dialog(page, timeout_seconds: float = 15.0) -> bool:
+def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool:
     return copyright_dialog.handle(page, timeout_seconds)
 
 
@@ -144,6 +145,7 @@ def install(web_uploader: Any):
     original_launch = web_uploader.launch_context
     original_prepare = web_uploader.prepare_upload
     original_confirm = web_uploader.confirm_publish_dialog
+    original_notice = web_uploader.dismiss_pre_caption_notice
     web_uploader.file_input_ready = file_input_ready
 
     def launch(playwright, profile):
@@ -161,13 +163,35 @@ def install(web_uploader: Any):
             return
         original_confirm(page)
 
+    def dismiss_pre_caption_notice(
+        page, status=None, timeout_seconds=45, optional_after_seconds=8
+    ):
+        # Upload selection can trigger another sequence of Kapat/Anladım dialogs.
+        tiktok_overlays.clear_new_account_overlays(
+            page, status=status, timeout_seconds=12, quiet_seconds=1.2
+        )
+        result = original_notice(
+            page, status=status, timeout_seconds=timeout_seconds,
+            optional_after_seconds=optional_after_seconds,
+        )
+        # TikTok may chain several Anladım dialogs after the first one.
+        tiktok_overlays.clear_new_account_overlays(
+            page, status=status, timeout_seconds=12, quiet_seconds=1.2
+        )
+        return result
+
     def prepare(request, publish=False, approval=None, status=None):
         original_wait = web_uploader.wait_for_upload_after_login
 
         def waiter(page, timeout_seconds=900, status=None):
-            return wait_for_upload_after_login(
+            result = wait_for_upload_after_login(
                 page, timeout_seconds, status, request.profile
             )
+            # New profile order: optional cookie -> Kapat -> every Anladım.
+            tiktok_overlays.clear_new_account_overlays(
+                page, status=status, timeout_seconds=20, quiet_seconds=1.5
+            )
+            return result
 
         web_uploader.wait_for_upload_after_login = waiter
         try:
@@ -179,5 +203,6 @@ def install(web_uploader: Any):
 
     web_uploader.launch_context = launch
     web_uploader.confirm_publish_dialog = confirm_publish_dialog
+    web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
     web_uploader.prepare_upload = prepare
     web_uploader._signaldesk_login_installed = True
