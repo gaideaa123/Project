@@ -1,5 +1,7 @@
-"""Compatibility launcher for the Azure GPT-4o application."""
-from app_tr import main
+import app_tr
+import session_gui
+
+session_gui.install(app_tr.TurkceAnaPencere)
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(app_tr.main())

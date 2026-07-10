@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-"""Profile-scoped TikTok session and visible login assistance.
-
-Secrets are stored in the operating-system keychain. CAPTCHA, 2FA, device
-verification and consent are never bypassed.
-"""
+"""Profile-scoped TikTok session and visible login assistance."""
 
 import re
 import time
-from collections.abc import Callable
 from typing import Any
 
 import keyring
@@ -16,16 +11,15 @@ from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as 
 
 SERVICE = "signaldesk-tiktok-web-login"
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
-StatusCallback = Callable[[str], None]
 
 class LoginError(RuntimeError): pass
 
-def _key(profile: str, field: str) -> str:
+def _key(profile, field):
     clean = re.sub(r"[^a-zA-Z0-9_.-]+", "-", profile.strip()).strip("-.")[:80]
     if not clean: raise LoginError("Profil adı geçersiz")
     return f"{clean}:{field}"
 
-def _session_value(raw: str) -> str:
+def _session_value(raw):
     value = raw.strip()
     match = re.search(r"(?:^|;\s*)sessionid=([^;\s]+)", value, re.I)
     if match: value = match.group(1)
@@ -33,36 +27,33 @@ def _session_value(raw: str) -> str:
         raise LoginError("Geçerli bir TikTok sessionid girin")
     return value
 
-def save_session(profile: str, session_id: str) -> None:
+def save_session(profile, session_id):
     keyring.set_password(SERVICE, _key(profile, "sessionid"), _session_value(session_id))
 
-def save_credentials(profile: str, identity: str, password: str) -> None:
-    """Save credentials, or a session when identity is `sessionid`."""
+def load_session(profile):
+    return keyring.get_password(SERVICE, _key(profile, "sessionid")) or ""
+
+def delete_session(profile):
+    try: keyring.delete_password(SERVICE, _key(profile, "sessionid"))
+    except keyring.errors.PasswordDeleteError: pass
+
+def save_credentials(profile, identity, password):
     if identity.strip().casefold() in {"sessionid", "session", "cookie"}:
         save_session(profile, password); return
     if not identity.strip() or not password:
-        raise LoginError("Kullanıcı + parola girin; session için kullanıcı alanına sessionid yazın")
+        raise LoginError("Kullanıcı + parola birlikte girilmeli")
     keyring.set_password(SERVICE, _key(profile, "identity"), identity.strip())
     keyring.set_password(SERVICE, _key(profile, "password"), password)
 
-def load_credentials(profile: str) -> tuple[str, str]:
+def load_credentials(profile):
     return (keyring.get_password(SERVICE, _key(profile, "identity")) or "",
             keyring.get_password(SERVICE, _key(profile, "password")) or "")
 
-def load_session(profile: str) -> str:
-    return keyring.get_password(SERVICE, _key(profile, "sessionid")) or ""
-
-def has_login(profile: str) -> bool:
+def has_login(profile):
     identity, password = load_credentials(profile)
     return bool(load_session(profile) or (identity and password))
 
-def has_credentials(profile: str) -> bool:
-    return has_login(profile)
-
-def delete_login(profile: str) -> None:
-    for field in ("identity", "password", "sessionid"):
-        try: keyring.delete_password(SERVICE, _key(profile, field))
-        except Exception: pass
+def has_credentials(profile): return has_login(profile)
 
 def _notify(callback, message):
     if callback: callback(message)
@@ -82,7 +73,8 @@ def _challenge(page):
     except PlaywrightError: return False
 
 def _fill(page, identity, password):
-    for candidate in [page.get_by_text(re.compile(r"use phone.*email.*username|telefon.*e-posta.*kullanıcı", re.I)), page.get_by_text(re.compile(r"email.*username|e-posta.*kullanıcı", re.I))]:
+    candidates = [page.get_by_text(re.compile(r"use phone.*email.*username|telefon.*e-posta.*kullanıcı", re.I)), page.get_by_text(re.compile(r"email.*username|e-posta.*kullanıcı", re.I))]
+    for candidate in candidates:
         if _visible(candidate):
             try: candidate.first.click(); page.wait_for_timeout(500); break
             except PlaywrightError: pass
@@ -95,7 +87,7 @@ def _fill(page, identity, password):
         submit.first.click() if _visible(submit) else pwd.first.press("Enter"); return True
     except PlaywrightError: return False
 
-def wait_for_upload_after_login(page: Page, timeout_seconds=900, status=None, profile=""):
+def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
     deadline = time.monotonic() + timeout_seconds
     identity, password = load_credentials(profile) if profile else ("", "")
     attempted = False; challenge_notice = False; last_nav = 0.0
@@ -120,7 +112,7 @@ def wait_for_upload_after_login(page: Page, timeout_seconds=900, status=None, pr
         page.wait_for_timeout(750)
     raise LoginError("TikTok session/giriş doğrulaması 15 dakika içinde tamamlanmadı")
 
-def install(web_uploader: Any) -> None:
+def install(web_uploader: Any):
     if getattr(web_uploader, "_signaldesk_login_installed", False): return
     original_launch, original_prepare = web_uploader.launch_context, web_uploader.prepare_upload
     def launch(playwright, profile):
