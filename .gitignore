@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+*.bak
+multi_account_registry.json
+*-renditions/
+dist/
+build/
+*.spec
+.DS_Store
+Thumbs.db
