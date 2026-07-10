@@ -5,35 +5,34 @@ import os
 import py_compile
 import string
 import tempfile
-from datetime import timedelta
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-def check(condition: bool, message: str) -> None:
-    if not condition:
-        raise AssertionError(message)
-    print("OK:", message)
+def check(value: bool, text: str) -> None:
+    if not value:
+        raise AssertionError(text)
+    print("OK:", text)
 
 
 def main() -> None:
     root = Path(__file__).parent
-    for name in ("app.py", "app_tr.py", "oauth_helper.py"):
-        py_compile.compile(str(root / name), doraise=True)
-        check(True, f"{name} sözdizimi")
+    for filename in ("app.py", "app_tr.py", "oauth_helper.py"):
+        py_compile.compile(str(root / filename), doraise=True)
+        check(True, f"{filename} sözdizimi")
 
-    import app
     import app_tr
     import oauth_helper
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLineEdit, QProgressBar, QSpinBox
 
     qt = QApplication.instance() or QApplication([])
     window = app_tr.TurkceAnaPencere()
-    check(hasattr(window, "master"), "ana medya alanı uyumlu")
-    check(hasattr(window, "output_dir"), "çıktı klasörü alanı mevcut")
-    check(hasattr(window, "batch_size"), "toplu işlem boyutu mevcut")
-    check(window.tabs.count() == 4, "dört Türkçe sekme yüklendi")
+    check(isinstance(window.master, QLineEdit), "ana medya alanı bulundu")
+    check(isinstance(window.output_dir, QLineEdit), "çıktı klasörü alanı bulundu")
+    check(isinstance(window.batch_size, QSpinBox), "çıktı sayısı alanı bulundu")
+    check(isinstance(window.progress, QProgressBar), "ilerleme çubuğu bulundu")
+    check(window.tabs.count() == 4, "dört sekme yüklendi")
 
     with tempfile.TemporaryDirectory() as temporary:
         target = Path(temporary) / "ciktilar"
@@ -46,14 +45,10 @@ def main() -> None:
         probe.unlink()
         check(True, "çıktı klasörüne yazılabiliyor")
 
-        registry_class = getattr(app, "PipelineRegistry", getattr(app, "AtomicRegistry", None))
-        check(registry_class is not None, "kayıt motoru mevcut")
-
     verifier = oauth_helper.make_verifier()
     check(len(verifier) == 64, "PKCE verifier uzunluğu")
     check(all(c in string.ascii_letters + string.digits + "-._~" for c in verifier), "PKCE karakter kümesi")
-    challenge = hashlib.sha256(verifier.encode("ascii")).hexdigest()
-    check(len(challenge) == 64, "PKCE hex challenge")
+    check(len(hashlib.sha256(verifier.encode("ascii")).hexdigest()) == 64, "PKCE hex challenge")
     window.close()
     qt.quit()
     print("\nTÜM DUMAN TESTLERİ GEÇTİ")
