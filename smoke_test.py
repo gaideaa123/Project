@@ -5,7 +5,7 @@ import os
 import py_compile
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -32,28 +32,32 @@ def main() -> None:
     import web_uploader
     from PySide6.QtWidgets import QApplication, QSpinBox
 
-    flow = inspect.getsource(web_uploader.prepare_upload)
-    steps = [
-        "upload_file(", "dismiss_pre_caption_notice(", "fill_caption(",
-        "wait_for_upload_complete(", "button.click(",
-        "confirm_publish_dialog(", "wait_for_publish_result(",
-    ]
-    positions = [flow.index(step) for step in steps]
-    check(positions == sorted(positions), "ana Paylaş → Hemen paylaş → sonuç sırası")
-
-    check(copyright_dialog.COPYRIGHT_WARNING.search("Telif hakkı kontrolü henüz bitmedi") is not None, "Türkçe telif uyarısı")
+    screenshot_text = (
+        "Paylaşmaya devam edilsin mi? "
+        "Telif hakkı kontrolü eksik. Videonuzu şimdi paylaşmak kontrolü durdurur. "
+        "Videonuzu hâlâ potansiyel sorunlar bakımından kontrol ediyoruz. "
+        "Kontrol tamamlanmadan önce paylaşmaya devam etmek ister misiniz?"
+    )
+    check(copyright_dialog.COPYRIGHT_WARNING.search(screenshot_text) is not None, "ekrandaki modal metni birebir tanındı")
+    check(copyright_dialog.COPYRIGHT_WARNING.search("Paylaşmaya devam edilsin mi?") is not None, "modal başlığı")
+    check(copyright_dialog.COPYRIGHT_WARNING.search("Telif hakkı kontrolü eksik") is not None, "eksik telif kontrolü metni")
     check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Hemen paylaş") is not None, "exact Hemen paylaş")
-    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Hemen yayınla") is not None, "exact Hemen yayınla")
-    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Share now") is not None, "exact Share now")
-    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Paylaş") is None, "genel Paylaş ikinci dialogda seçilmez")
+    check(copyright_dialog.CANCEL.fullmatch("İptal") is not None, "İptal kardeş düğmesi")
+    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Paylaş") is None, "yanlış genel Paylaş eşleşmez")
 
-    handler = inspect.getsource(copyright_dialog.handle)
-    check('get_by_role("dialog")' in handler, "yalnız dialog scope")
-    check("COPYRIGHT_WARNING.search(text)" in handler, "telif metni doğrulaması")
-    check('get_by_text(IMMEDIATE_SHARE, exact=True)' in handler, "nested Hemen paylaş fallback")
-    check("ancestor::*[self::button or @role='button']" in handler, "tıklanabilir parent fallback")
+    handler = inspect.getsource(copyright_dialog)
+    check("[aria-modal=\"true\"]" in handler, "aria-modal fallback")
+    check("[class*=\"modal\" i]" in handler, "class modal fallback")
+    check("ancestor::*" in handler, "semantiksiz modal ancestor fallback")
+    check("has_share and has_cancel" in handler, "Hemen paylaş + İptal ile container doğrulama")
+    check("_click_immediate_share(container)" in handler, "doğrulanmış container içinde tıklama")
     check(web_uploader.confirm_publish_dialog.__module__ == "tiktok_login", "handler web uploader'a kuruldu")
     check(tiktok_login.handle_copyright_publish_dialog.__module__ == "tiktok_login", "handler delegasyonu")
+
+    flow = inspect.getsource(web_uploader.prepare_upload)
+    steps = ["button.click(", "confirm_publish_dialog(", "wait_for_publish_result("]
+    positions = [flow.index(step) for step in steps]
+    check(positions == sorted(positions), "ana Paylaş → Hemen paylaş → yayın sonucu")
 
     qt = QApplication.instance() or QApplication([])
     with patch.object(app_tr.tiktok_login, "has_session", return_value=False), patch.object(app_tr.tiktok_login, "has_credentials", return_value=False):
@@ -76,7 +80,7 @@ def main() -> None:
                 start.assert_called_once_with(expected)
         window.close()
     qt.quit()
-    print("\nHEMEN PAYLAŞ VE SIRALI YAYIN TESTLERİ GEÇTİ")
+    print("\nGERÇEK TELİF MODALI VE SIRALI YAYIN TESTLERİ GEÇTİ")
 
 
 if __name__ == "__main__":
