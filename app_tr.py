@@ -4,9 +4,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import keyring
-from PySide6.QtCore import QLocale, QTimer
+from PySide6.QtCore import QLocale, Qt
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
@@ -20,78 +21,39 @@ VARSAYILAN_KAPSAMLAR = "user.info.basic,video.publish"
 
 METINLER = {
     "SIGNALDESK / AGENCY OPERATIONS": "SIGNALDESK / AJANS OPERASYONLARI",
+    "SIGNALDESK / PUBLISH OPERATIONS": "SIGNALDESK / AJANS OPERASYONLARI",
     "Ship content with a paper trail.": "İçeriği kayıtlı, kontrollü ve güvenli yayınla.",
-    "Profile Manager": "Profil Yönetimi",
-    "Batch Processing": "Toplu Medya İşleme",
-    "Deployment Queue": "Yayın Kuyruğu",
-    "Connect an official channel": "Resmî bir kanal bağla",
-    "OAuth tokens stay in the operating system keychain. JSON never contains credentials.":
-        "OAuth belirteçleri işletim sisteminin güvenli kasasında tutulur. JSON dosyasına kimlik bilgisi yazılmaz.",
-    "Profile": "Profil", "Platform": "Platform", "Access token": "Erişim belirteci",
-    "Refresh token": "Yenileme belirteci", "Network gateway": "Ağ geçidi",
+    "Content control, without the chaos.": "İçeriği kayıtlı, kontrollü ve güvenli yayınla.",
+    "Profile Manager": "Profil Yönetimi", "Accounts": "Profil Yönetimi",
+    "Batch Processing": "Toplu Medya İşleme", "Processing": "Toplu Medya İşleme",
+    "Deployment Queue": "Yayın Kuyruğu", "Scheduler": "Yayın Kuyruğu",
+    "Connect an official channel": "Resmî bir kanal bağla", "Connect a profile": "Resmî bir kanal bağla",
+    "Profile": "Profil", "Profile name": "Profil", "Platform": "Platform",
+    "Access token": "Erişim belirteci", "Refresh token": "Yenileme belirteci",
+    "Network gateway": "Ağ geçidi", "Network proxy": "Ağ geçidi",
     "Add profile": "Profil ekle", "Authorized profiles": "Yetkilendirilmiş profiller",
-    "Remove selected": "Seçileni kaldır", "Token": "Belirteç", "Network": "Ağ",
-    "Added": "Eklenme", "H.264 rendition batch": "H.264 çıktı paketi",
-    "CRF 20 to 23, normalized H.264/AAC, mobile sharpening, optional micro-grain, and loudness normalization.":
-        "CRF 20-23, standart H.264/AAC, mobil keskinlik, hafif film dokusu ve ses normalizasyonu.",
-    "Select master": "Ana dosyayı seç", "Select folder": "Çıktı klasörünü seç",
-    "Start batch": "Toplu işlemi başlat", "Processing log": "İşlem günlüğü",
-    "Browse": "Gözat", "Deployment time": "Yayın zamanı", "Caption": "Açıklama",
+    "Connected profiles": "Yetkilendirilmiş profiller", "Remove selected": "Seçileni kaldır",
+    "Token": "Belirteç", "Token health": "Belirteç", "Network": "Ağ", "Added": "Eklenme",
+    "H.264 rendition batch": "H.264 çıktı paketi", "Delivery renditions": "H.264 çıktı paketi",
+    "Select master": "Ana dosyayı seç", "Choose video": "Ana dosyayı seç",
+    "Select folder": "Çıktı klasörünü seç", "Start batch": "Toplu işlemi başlat",
+    "Render outputs": "Toplu işlemi başlat", "Processing log": "İşlem günlüğü",
+    "Live operations log": "İşlem günlüğü", "Browse": "Gözat",
+    "Deployment time": "Yayın zamanı", "Run at": "Yayın zamanı", "Caption": "Açıklama",
     "Repeat daily": "Her gün tekrarla", "Queue deployment": "Yayını kuyruğa ekle",
-    "23-hour guarded pipeline": "23 saat korumalı yayın hattı",
-    "Run due jobs": "Zamanı gelenleri çalıştır", "Asset": "Medya",
-    "Next run": "Sonraki çalışma", "Cadence": "Tekrar", "State": "Durum",
-    "Publish ID": "Yayın kimliği",
-}
-
-YER_TUTUCULAR = {
-    "Brand Europe": "Marka Türkiye",
-    "Official OAuth access token": "Resmî OAuth erişim belirteci",
-    "Official OAuth refresh token": "Resmî OAuth yenileme belirteci",
-    "Optional approved corporate gateway": "İsteğe bağlı kurumsal ağ geçidi",
-    "Master media file": "Ana medya dosyası", "Output folder": "Çıktı klasörü",
-    "Compliant MP4 rendition": "Standartlara uygun MP4 çıktısı",
-    "Approved caption": "Onaylanmış gönderi açıklaması",
+    "Queue post": "Yayını kuyruğa ekle", "23-hour guarded pipeline": "23 saat korumalı yayın hattı",
+    "Posting pipeline": "23 saat korumalı yayın hattı", "Run due jobs": "Zamanı gelenleri çalıştır",
+    "Run due now": "Zamanı gelenleri çalıştır", "Asset": "Medya", "Video": "Medya",
+    "Next run": "Sonraki çalışma", "Next deployment": "Sonraki çalışma",
+    "Cadence": "Tekrar", "State": "Durum", "Publish ID": "Yayın kimliği",
 }
 
 DURUM = {
     "Ready": "Hazır", "Refresh soon": "Yakında yenilenecek", "Gateway": "Ağ geçidi",
-    "Direct": "Doğrudan", "Daily": "Günlük", "Once": "Tek sefer",
-    "Queued": "Kuyrukta", "Running": "Çalışıyor", "Failed": "Başarısız",
-    "Submitted": "Gönderildi",
+    "Approved proxy": "Ağ geçidi", "Direct": "Doğrudan", "Daily": "Günlük",
+    "Once": "Tek sefer", "Queued": "Kuyrukta", "Running": "Çalışıyor",
+    "Failed": "Başarısız", "Submitted": "Gönderildi",
 }
-
-PARCALAR = {
-    "Profile name, access token, and refresh token are required":
-        "Profil adı, erişim belirteci ve yenileme belirteci zorunludur",
-    "Select a profile first": "Önce bir profil seçin",
-    "Choose an existing master file and output folder":
-        "Var olan bir ana medya dosyası ve çıktı klasörü seçin",
-    "Choose a profile, an existing MP4, and a caption":
-        "Bir profil, var olan bir MP4 dosyası ve açıklama seçin",
-    "Select a deployment first": "Önce bir yayın seçin",
-    "Wait for the current network request to finish": "Etkin ağ işleminin bitmesini bekleyin",
-    "Profile names must be unique": "Profil adları benzersiz olmalıdır",
-    "No access token is stored for this profile": "Bu profil için erişim belirteci kayıtlı değil",
-    "Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET for refresh":
-        "API Ayarları sekmesinden Client Key ve Client Secret değerlerini kaydedin",
-    "23-hour guard": "23 saat koruması",
-}
-
-HATA = {
-    "Missing details": "Eksik bilgi", "Could not add profile": "Profil eklenemedi",
-    "Nothing selected": "Seçim yapılmadı", "Missing paths": "Dosya yolları eksik",
-    "Batch failed": "Toplu işlem başarısız", "Incomplete deployment": "Yayın bilgileri eksik",
-    "Could not queue deployment": "Yayın kuyruğa eklenemedi",
-    "Deployment is active": "Yayın işlemi sürüyor", "Deployment failed": "Yayın başarısız",
-}
-
-
-def cevir(metin: str) -> str:
-    sonuc = METINLER.get(metin, metin)
-    for kaynak, hedef in PARCALAR.items():
-        sonuc = sonuc.replace(kaynak, hedef)
-    return sonuc
 
 
 def kasa_oku(ad: str, varsayilan: str = "") -> str:
@@ -101,64 +63,80 @@ def kasa_oku(ad: str, varsayilan: str = "") -> str:
         return varsayilan
 
 
-def kayitli_ayarlari_ortama_yukle() -> None:
-    ayarlar = {
+def ayarlari_yukle() -> None:
+    values = {
         "TIKTOK_CLIENT_KEY": kasa_oku("client_key"),
         "TIKTOK_CLIENT_SECRET": kasa_oku("client_secret"),
         "TIKTOK_REDIRECT_URI": kasa_oku("redirect_uri", VARSAYILAN_REDIRECT),
         "TIKTOK_SCOPES": kasa_oku("scopes", VARSAYILAN_KAPSAMLAR),
     }
-    for ad, deger in ayarlar.items():
-        if deger:
-            os.environ[ad] = deger
+    for name, value in values.items():
+        if value:
+            os.environ[name] = value
 
 
 class TurkceAnaPencere(core.MainWindow):
     def build_ui(self) -> None:
         super().build_ui()
         self.setWindowTitle("SignalDesk Ajans Paneli")
-        self.tabs.addTab(self.api_ayarlari_sekmesi(), "API Ayarları")
-        self._arayuzu_cevir()
-        self._cikti_alani_saglamlastir()
+        self._cekirdek_uyumlulugunu_kur()
+        self.tabs.addTab(self.api_sekmesi(), "API Ayarları")
+        self._cevir()
 
-    def _cikti_alani_saglamlastir(self) -> None:
-        """Windows'ta klasör yolu görünür, yazılabilir ve doğrulanabilir kalsın."""
-        alan = getattr(self, "output_dir", None)
-        if alan is None:
-            return
-        alan.setReadOnly(False)
-        alan.setClearButtonEnabled(True)
-        alan.setPlaceholderText("Çıktı klasörünü seçin veya tam yolu buraya yazın")
-        alan.editingFinished.connect(self._cikti_yolunu_dogrula)
+    def _cekirdek_uyumlulugunu_kur(self) -> None:
+        """Eski ve yeni app.py alanlarını tek kararlı arayüze uyarlar."""
+        if not hasattr(self, "master") and hasattr(self, "master_video"):
+            self.master = self.master_video
+        if not hasattr(self, "batch_size") and hasattr(self, "variant_count"):
+            self.batch_size = self.variant_count
+        if not hasattr(self, "progress") and hasattr(self, "render_progress"):
+            self.progress = self.render_progress
 
-    def _cikti_yolunu_dogrula(self) -> None:
-        alan = getattr(self, "output_dir", None)
-        if alan is None or not alan.text().strip():
-            return
-        yol = Path(os.path.expandvars(os.path.expanduser(alan.text().strip()))).resolve()
-        alan.setText(str(yol))
+        if not hasattr(self, "output_dir"):
+            self.output_dir = QLineEdit()
+            self.output_dir.setPlaceholderText("Çıktı klasörünü seçin veya tam yolu yazın")
+            self.output_dir.setClearButtonEnabled(True)
+            button = QPushButton("Çıktı klasörünü seç")
+            button.clicked.connect(self.choose_output)
+            row = QHBoxLayout()
+            row.addWidget(self.output_dir, 1)
+            row.addWidget(button)
+            processing_page = self.tabs.widget(1)
+            page_layout = processing_page.layout() if processing_page else None
+            controls = None
+            if page_layout:
+                for index in range(page_layout.count()):
+                    item = page_layout.itemAt(index)
+                    widget = item.widget()
+                    if isinstance(widget, QFrame) and widget.layout():
+                        controls = widget
+                        break
+            if controls and controls.layout():
+                controls.layout().insertLayout(max(0, controls.layout().count() - 3), row)
+            elif page_layout:
+                page_layout.addLayout(row)
 
-    def api_ayarlari_sekmesi(self) -> QWidget:
-        sayfa = QWidget()
-        dis = QHBoxLayout(sayfa)
-        dis.setContentsMargins(0, 18, 0, 0)
+        self.output_dir.setReadOnly(False)
+        self.output_dir.setClearButtonEnabled(True)
+        self.output_dir.editingFinished.connect(self._normalize_output)
+
+    def api_sekmesi(self) -> QWidget:
+        page = QWidget()
+        outer = QHBoxLayout(page)
+        outer.setContentsMargins(0, 18, 0, 0)
         panel = QFrame()
         panel.setObjectName("panel")
-        yerlesim = QVBoxLayout(panel)
-        yerlesim.setContentsMargins(28, 24, 28, 28)
-        yerlesim.setSpacing(16)
-        baslik = QLabel("TikTok API ve OAuth Ayarları")
-        baslik.setObjectName("sectionTitle")
-        aciklama = QLabel(
-            "Client Key ve Client Secret uygulamaya aittir. Access Token ve Refresh Token her "
-            "TikTok profiline özeldir ve Profil Yönetimi sekmesinden girilir."
-        )
-        aciklama.setObjectName("muted")
-        aciklama.setWordWrap(True)
-        yerlesim.addWidget(baslik)
-        yerlesim.addWidget(aciklama)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setSpacing(16)
+        title = QLabel("TikTok API ve OAuth Ayarları")
+        title.setObjectName("sectionTitle")
+        note = QLabel("Uygulama anahtarları güvenli kasada, profil belirteçleri Profil Yönetimi'nde saklanır.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(note)
         form = QFormLayout()
-        form.setSpacing(12)
         self.client_key_alani = QLineEdit(kasa_oku("client_key"))
         self.client_secret_alani = QLineEdit(kasa_oku("client_secret"))
         self.client_secret_alani.setEchoMode(QLineEdit.Password)
@@ -168,178 +146,205 @@ class TurkceAnaPencere(core.MainWindow):
         form.addRow("Client Secret", self.client_secret_alani)
         form.addRow("Redirect URI", self.redirect_alani)
         form.addRow("OAuth kapsamları", self.kapsam_alani)
-        yerlesim.addLayout(form)
-        dugmeler = QHBoxLayout()
-        kaydet = QPushButton("Ayarları güvenli kasaya kaydet")
-        kaydet.setObjectName("primaryButton")
-        kaydet.clicked.connect(self.api_ayarlari_kaydet)
-        yetkilendir = QPushButton("Profil belirteçlerini al")
-        yetkilendir.clicked.connect(self.oauth_yardimcisini_ac)
-        goster = QCheckBox("Client Secret'ı göster")
-        goster.toggled.connect(lambda acik: self.client_secret_alani.setEchoMode(QLineEdit.Normal if acik else QLineEdit.Password))
-        dugmeler.addWidget(kaydet)
-        dugmeler.addWidget(yetkilendir)
-        dugmeler.addWidget(goster)
-        dugmeler.addStretch()
-        yerlesim.addLayout(dugmeler)
-        rehber = QLabel(
-            "1. Developer Portal'da Login Kit ve Content Posting API ürünlerini ekle.\n"
-            "2. Redirect URI olarak http://127.0.0.1:3455/callback/ kaydet.\n"
-            "3. Client Key ve Secret'ı buraya yapıştırıp kaydet.\n"
-            "4. Profil belirteçlerini al düğmesiyle doğru TikTok hesabına izin ver.\n"
-            "5. Terminaldeki Access Token ve Refresh Token'ı Profil Yönetimi'ne gir."
+        layout.addLayout(form)
+        buttons = QHBoxLayout()
+        save = QPushButton("Ayarları güvenli kasaya kaydet")
+        save.setObjectName("primaryButton")
+        save.clicked.connect(self.api_kaydet)
+        auth = QPushButton("Profil belirteçlerini al")
+        auth.clicked.connect(self.oauth_ac)
+        show = QCheckBox("Client Secret'ı göster")
+        show.toggled.connect(lambda checked: self.client_secret_alani.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password))
+        buttons.addWidget(save)
+        buttons.addWidget(auth)
+        buttons.addWidget(show)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        steps = QLabel(
+            "1. Developer Portal'da Login Kit ve Content Posting API ekle.\n"
+            "2. Redirect URI'yi http://127.0.0.1:3455/callback/ yap.\n"
+            "3. Sandbox Client Key ve Secret değerlerini kaydet.\n"
+            "4. Profil belirteçlerini al, sonra Access/Refresh Token'ı Profil Yönetimi'ne gir."
         )
-        rehber.setObjectName("muted")
-        rehber.setWordWrap(True)
-        yerlesim.addWidget(rehber)
-        yerlesim.addStretch()
-        dis.addWidget(panel, 1)
-        return sayfa
+        steps.setObjectName("muted")
+        steps.setWordWrap(True)
+        layout.addWidget(steps)
+        layout.addStretch()
+        outer.addWidget(panel, 1)
+        return page
 
-    def api_ayarlari_kaydet(self) -> bool:
-        degerler = {
+    def api_kaydet(self, bilgi_goster: bool = True) -> bool:
+        data = {
             "client_key": self.client_key_alani.text().strip(),
             "client_secret": self.client_secret_alani.text().strip(),
             "redirect_uri": self.redirect_alani.text().strip(),
             "scopes": self.kapsam_alani.text().strip(),
         }
-        if not all(degerler.values()):
-            QMessageBox.warning(self, "Eksik API ayarı", "Dört alanın tamamını doldurun.")
-            return False
-        if not degerler["redirect_uri"].startswith(("http://127.0.0.1:", "http://localhost:")):
-            QMessageBox.warning(self, "Redirect URI geçersiz", "Port içeren 127.0.0.1 veya localhost adresi kullanın.")
+        if not all(data.values()):
+            QMessageBox.warning(self, "Eksik API ayarı", "Tüm API alanlarını doldurun.")
             return False
         try:
-            for ad, deger in degerler.items():
-                keyring.set_password(AYAR_SERVISI, ad, deger)
-            kayitli_ayarlari_ortama_yukle()
-            QMessageBox.information(self, "Kaydedildi", "API ayarları güvenli kasaya kaydedildi.")
+            for name, value in data.items():
+                keyring.set_password(AYAR_SERVISI, name, value)
+            ayarlari_yukle()
+            if bilgi_goster:
+                QMessageBox.information(self, "Kaydedildi", "API ayarları güvenli kasaya kaydedildi.")
             return True
         except Exception as exc:
             self.error("API ayarları kaydedilemedi", str(exc))
             return False
 
-    def oauth_yardimcisini_ac(self) -> None:
-        if not self.api_ayarlari_kaydet():
+    def oauth_ac(self) -> None:
+        if not self.api_kaydet(False):
             return
-        yardimci = Path(__file__).with_name("oauth_helper.py")
+        helper = Path(__file__).with_name("oauth_helper.py")
         try:
-            kwargs = {"cwd": str(yardimci.parent), "env": os.environ.copy()}
+            kwargs: dict[str, Any] = {"cwd": str(helper.parent), "env": os.environ.copy()}
             if sys.platform == "win32":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-            subprocess.Popen([sys.executable, str(yardimci)], **kwargs)
+            subprocess.Popen([sys.executable, str(helper)], **kwargs)
         except Exception as exc:
             self.error("OAuth yardımcısı açılamadı", str(exc))
 
-    def _arayuzu_cevir(self) -> None:
-        if hasattr(self, "tabs"):
-            for index, ad in enumerate(("Profil Yönetimi", "Toplu Medya İşleme", "Yayın Kuyruğu", "API Ayarları")):
-                if index < self.tabs.count():
-                    self.tabs.setTabText(index, ad)
-        for etiket in self.findChildren(QLabel):
-            etiket.setText(METINLER.get(etiket.text(), etiket.text()))
-        for dugme in self.findChildren(QPushButton):
-            dugme.setText(METINLER.get(dugme.text(), dugme.text()))
-        for kutu in self.findChildren(QCheckBox):
-            kutu.setText(METINLER.get(kutu.text(), kutu.text()))
-        for alan in self.findChildren(QLineEdit):
-            alan.setPlaceholderText(YER_TUTUCULAR.get(alan.placeholderText(), alan.placeholderText()))
+    def _cevir(self) -> None:
+        for index, name in enumerate(("Profil Yönetimi", "Toplu Medya İşleme", "Yayın Kuyruğu", "API Ayarları")):
+            if index < self.tabs.count():
+                self.tabs.setTabText(index, name)
+        for label in self.findChildren(QLabel):
+            label.setText(METINLER.get(label.text(), label.text()))
+        for button in self.findChildren(QPushButton):
+            button.setText(METINLER.get(button.text(), button.text()))
         if hasattr(self, "accounts"):
             self.accounts.setHorizontalHeaderLabels(["Profil", "Platform", "Belirteç", "Ağ", "Eklenme"])
+        elif hasattr(self, "accounts_table"):
+            self.accounts_table.setHorizontalHeaderLabels(["Profil", "Belirteç", "Ağ", "Eklenme"])
         if hasattr(self, "jobs"):
             self.jobs.setHorizontalHeaderLabels(["Profil", "Medya", "Sonraki çalışma", "Tekrar", "Durum", "Yayın kimliği"])
+        elif hasattr(self, "jobs_table"):
+            self.jobs_table.setHorizontalHeaderLabels(["Profil", "Medya", "Sonraki çalışma", "Tekrar", "Durum", "Yayın kimliği"])
         if hasattr(self, "batch_size"):
             self.batch_size.setSuffix(" çıktı")
         if hasattr(self, "run_at"):
             self.run_at.setDisplayFormat("dd.MM.yyyy HH:mm")
+        elif hasattr(self, "schedule_time"):
+            self.schedule_time.setDisplayFormat("dd.MM.yyyy HH:mm")
 
     def refresh(self) -> None:
-        super().refresh()
-        self._arayuzu_cevir()
-        if hasattr(self, "accounts"):
-            for row in range(self.accounts.rowCount()):
-                for column in (2, 3):
-                    item = self.accounts.item(row, column)
-                    if item:
-                        item.setText(DURUM.get(item.text(), item.text()))
-        if hasattr(self, "jobs"):
-            for row in range(self.jobs.rowCount()):
-                for column in (3, 4):
-                    item = self.jobs.item(row, column)
-                    if item:
-                        item.setText(DURUM.get(item.text(), item.text()))
-        if hasattr(self, "status"):
-            self.status.setText(self.status.text().replace("PROFILES", "PROFİL").replace("JOBS", "İŞ").replace("DELIVERIES", "YAYIN"))
+        if hasattr(super(), "refresh"):
+            super().refresh()
+        elif hasattr(super(), "refresh_all"):
+            super().refresh_all()
+        self._cevir()
+        for table_name in ("accounts", "accounts_table"):
+            table = getattr(self, table_name, None)
+            if table:
+                for row in range(table.rowCount()):
+                    for column in range(table.columnCount()):
+                        item = table.item(row, column)
+                        if item:
+                            item.setText(DURUM.get(item.text(), item.text()))
 
-    def error(self, title: str, details: str) -> None:
-        super().error(HATA.get(title, cevir(title)), cevir(details))
+    def _normalize_output(self) -> None:
+        if self.output_dir.text().strip():
+            self.output_dir.setText(str(Path(self.output_dir.text().strip()).expanduser().resolve()))
+
+    def choose_output(self) -> None:
+        initial = self.output_dir.text().strip()
+        if not initial or not Path(initial).exists():
+            master_text = self.master.text().strip() if hasattr(self, "master") else ""
+            initial = str(Path(master_text).parent) if master_text else str(Path.home())
+        selected = QFileDialog.getExistingDirectory(
+            self, "Çıktı klasörünü seç", initial,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not selected:
+            return
+        target = Path(selected).resolve()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".signaldesk-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            self.error("Klasör kullanılamıyor", str(exc))
+            return
+        self.output_dir.setText(str(target))
+        self.output_dir.repaint()
+        QApplication.processEvents()
+        if hasattr(self, "log"):
+            self.log(f"Çıktı klasörü seçildi: {target}")
 
     def choose_master(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Ana medya dosyasını seç", "", "Medya (*.mp4 *.mov *.mkv *.webm)")
-        if not path:
-            return
-        self.master.setText(str(Path(path).resolve()))
-        if hasattr(self, "output_dir") and not self.output_dir.text().strip():
-            source = Path(path).resolve()
-            hedef = source.parent / f"{source.stem}-ciktilar"
-            self.output_dir.setText(str(hedef))
-            self.output_dir.repaint()
-
-    def choose_output(self) -> None:
-        alan = getattr(self, "output_dir", None)
-        if alan is None:
-            self.error("Sürüm uyuşmazlığı", "app.py güncel değil. Depodaki tüm dosyaları birlikte yeniden indirin.")
-            return
-        baslangic = alan.text().strip()
-        if not baslangic or not Path(baslangic).exists():
-            master = getattr(self, "master", None)
-            baslangic = str(Path(master.text()).parent) if master and master.text().strip() else str(Path.home())
-        secilen = QFileDialog.getExistingDirectory(
-            self, "Çıktı klasörünü seç", baslangic,
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
-        )
-        if not secilen:
-            return
-        yol = Path(secilen).resolve()
-        try:
-            yol.mkdir(parents=True, exist_ok=True)
-            test = yol / ".signaldesk-yazma-testi"
-            test.write_text("ok", encoding="utf-8")
-            test.unlink()
-        except OSError as exc:
-            self.error("Klasör kullanılamıyor", f"Seçilen klasöre yazılamıyor: {exc}")
-            return
-        alan.setText(str(yol))
-        alan.setCursorPosition(0)
-        alan.repaint()
-        QApplication.processEvents()
-        self.log(f"Çıktı klasörü seçildi: {yol}")
-
-    def choose_queue_video(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Yayınlanacak medyayı seç", "", "MP4 video (*.mp4)")
         if path:
-            self.queue_video.setText(str(Path(path).resolve()))
+            self.master.setText(str(Path(path).resolve()))
+            if not self.output_dir.text().strip():
+                source = Path(path).resolve()
+                self.output_dir.setText(str(source.parent / f"{source.stem}-ciktilar"))
 
     def start_batch(self) -> None:
-        alan = getattr(self, "output_dir", None)
-        if alan and alan.text().strip():
-            try:
-                Path(alan.text().strip()).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                self.error("Çıktı klasörü oluşturulamadı", str(exc))
-                return
-        super().start_batch()
+        source = Path(self.master.text().strip())
+        target = Path(self.output_dir.text().strip()) if self.output_dir.text().strip() else Path()
+        if not source.is_file() or not self.output_dir.text().strip():
+            self.error("Eksik dosya yolu", "Ana medya dosyasını ve çıktı klasörünü seçin.")
+            return
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.error("Çıktı klasörü oluşturulamadı", str(exc))
+            return
+        count = self.batch_size.value()
+
+        if hasattr(self, "encoder") and hasattr(self, "runner"):
+            self.render_button.setEnabled(False)
+            self.progress.setValue(0)
+            signals = self.runner.start(lambda channel: self.encoder.encode(source, target, count, channel))
+            signals.log.connect(self.log)
+            signals.progress.connect(self.progress.setValue)
+            signals.result.connect(self._batch_done)
+            signals.error.connect(lambda detail: self.error("Toplu işlem başarısız", detail))
+            signals.finished.connect(lambda: self.render_button.setEnabled(True))
+            return
+
+        if hasattr(core, "Worker") and hasattr(self, "renderer") and hasattr(self, "pool"):
+            self.render_button.setEnabled(False)
+            self.progress.setValue(0)
+            worker = core.Worker(lambda signals: self.renderer.render_many(source, count, target, signals))
+            worker.signals.log.connect(self.log)
+            worker.signals.progress.connect(self.progress.setValue)
+            worker.signals.result.connect(self._batch_done)
+            worker.signals.error.connect(lambda detail: self.error("Toplu işlem başarısız", detail))
+            worker.signals.finished.connect(lambda: self.render_button.setEnabled(True))
+            self.pool.start(worker)
+            return
+        self.error("Çekirdek uyumsuz", "Video işleme motoru bulunamadı.")
+
+    def _batch_done(self, outputs: object) -> None:
+        self.last_outputs = list(outputs or [])
+        queue_field = getattr(self, "queue_video", getattr(self, "schedule_video", None))
+        if queue_field and self.last_outputs:
+            queue_field.setText(self.last_outputs[0])
+        self.log(f"{len(self.last_outputs)} çıktı tamamlandı")
+
+    def start_render(self) -> None:
+        self.start_batch()
+
+    def error(self, title: str, details: str) -> None:
+        if hasattr(super(), "error"):
+            super().error(title, details)
+        else:
+            super().show_error(title, details)
 
 
 def main() -> int:
-    kayitli_ayarlari_ortama_yukle()
+    ayarlari_yukle()
     app = QApplication(sys.argv)
     app.setApplicationName("SignalDesk Ajans Paneli")
     app.setOrganizationName("SignalDesk")
     app.setStyle("Fusion")
     QLocale.setDefault(QLocale(QLocale.Turkish, QLocale.Turkey))
-    pencere = TurkceAnaPencere()
-    pencere.show()
+    window = TurkceAnaPencere()
+    window.show()
     return app.exec()
 
 
