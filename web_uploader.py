@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-"""Visible, user-confirmed TikTok Studio upload assistant.
-
-This module does not bypass login, CAPTCHA, 2FA, platform review, or the final
-Publish confirmation. It opens a normal persistent Chromium profile, uploads
-one local video, fills its caption, then leaves the browser open for review.
-"""
+"""Visible TikTok Studio upload assistant with explicit user confirmation."""
 
 import argparse
 import json
@@ -13,19 +8,25 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from platformdirs import user_data_dir
 from playwright.sync_api import (
-    BrowserContext, Locator, Page, Playwright, TimeoutError as PlaywrightTimeout,
+    BrowserContext,
+    Error as PlaywrightError,
+    Locator,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeout,
     sync_playwright,
 )
 
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
 DATA_ROOT = Path(user_data_dir("signaldesk-web-uploader", "SignalDesk"))
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
+CONFIRMATION = "ONAYLA VE YAYINLA"
 
 
 class UploadError(RuntimeError):
@@ -43,7 +44,7 @@ class UploadRequest:
             raise UploadError("Profil adı boş")
         if not self.video.is_file() or self.video.suffix.lower() not in MEDIA_EXTENSIONS:
             raise UploadError(f"Geçerli video bulunamadı: {self.video}")
-        if self.video.stat().st_size == 0:
+        if self.video.stat().st_size <= 0:
             raise UploadError(f"Video boş: {self.video}")
         if not self.caption.strip():
             raise UploadError("Caption boş")
@@ -58,26 +59,33 @@ def safe_profile_name(value: str) -> str:
     return clean[:80]
 
 
-def first_visible(locators: Iterable[Locator], timeout_ms: int = 1500) -> Locator | None:
+def first_visible(locators: Iterable[Locator], timeout_ms: int = 1200) -> Locator | None:
     for locator in locators:
         try:
             if locator.first.is_visible(timeout=timeout_ms):
                 return locator.first
-        except PlaywrightTimeout:
+        except (PlaywrightTimeout, PlaywrightError):
             continue
     return None
+
+
+def publish_candidates(page: Page) -> list[Locator]:
+    return [
+        page.get_by_role("button", name=re.compile(r"^post$|^publish$|^yayınla$|^paylaş$", re.I)),
+        page.locator('button[data-e2e*="post" i]'),
+        page.locator('button[data-e2e*="publish" i]'),
+    ]
 
 
 def wait_for_login(page: Page, timeout_seconds: int = 600) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if "/login" not in page.url.lower():
-            file_input = page.locator('input[type="file"]')
-            try:
-                if file_input.count() and file_input.first.is_attached():
-                    return
-            except Exception:
-                pass
+        try:
+            field = page.locator('input[type="file"]')
+            if "/login" not in page.url.lower() and field.count() and field.first.is_attached():
+                return
+        except PlaywrightError:
+            pass
         page.wait_for_timeout(1000)
     raise UploadError("Giriş için 10 dakika doldu. Tarayıcıdan giriş yapıp yeniden deneyin")
 
@@ -88,14 +96,12 @@ def upload_file(page: Page, video: Path) -> None:
         if direct.count():
             direct.first.set_input_files(str(video.resolve()))
             return
-    except Exception:
+    except PlaywrightError:
         pass
-
-    buttons = [
+    trigger = first_visible([
         page.get_by_role("button", name=re.compile(r"select|upload|choose|yükle|seç", re.I)),
         page.get_by_text(re.compile(r"select video|upload video|video seç|video yükle", re.I)),
-    ]
-    trigger = first_visible(buttons, 2500)
+    ], 2500)
     if trigger is None:
         raise UploadError("Video seçim alanı bulunamadı. TikTok Studio arayüzü değişmiş olabilir")
     try:
@@ -114,7 +120,6 @@ def caption_candidates(page: Page) -> list[Locator]:
         page.get_by_role("textbox", name=re.compile(r"caption|description|açıklama", re.I)),
         page.locator('textarea[placeholder*="caption" i]'),
         page.locator('textarea[placeholder*="description" i]'),
-        page.locator('[contenteditable="true"]').first,
     ]
 
 
@@ -128,53 +133,51 @@ def fill_caption(page: Page, caption: str, timeout_seconds: int = 180) -> None:
             if tag in {"textarea", "input"}:
                 field.fill(caption)
             else:
-                page.keyboard.press("Control+A")
-                page.keyboard.insert_text(caption)
+                field.press("ControlOrMeta+A")
+                field.press("Backspace")
+                field.type(caption, delay=1)
             return
         page.wait_for_timeout(1000)
-    raise UploadError("Caption alanı yüklenmedi. Video işleme tamamlanmamış veya sayfa değişmiş olabilir")
+    raise UploadError("Caption alanı yüklenmedi. Video işleme tamamlanmamış olabilir")
 
 
-def wait_until_ready(page: Page, timeout_seconds: int = 600) -> None:
+def wait_until_ready(page: Page, timeout_seconds: int = 600) -> Locator:
     deadline = time.monotonic() + timeout_seconds
     failure = re.compile(r"upload failed|couldn't upload|yükleme başarısız|unsupported", re.I)
     while time.monotonic() < deadline:
-        body = page.locator("body")
         try:
-            text = body.inner_text(timeout=2000)
-            if failure.search(text):
+            if failure.search(page.locator("body").inner_text(timeout=2000)):
                 raise UploadError("TikTok videoyu reddetti: sayfadaki hata mesajını kontrol edin")
         except PlaywrightTimeout:
             pass
-
-        publish = first_visible([
-            page.get_by_role("button", name=re.compile(r"^post$|^publish$|^yayınla$|^paylaş$", re.I)),
-            page.locator('button[data-e2e*="post" i]'),
-        ], 500)
+        publish = first_visible(publish_candidates(page), 500)
         if publish is not None:
             try:
                 if publish.is_enabled():
-                    return
-            except Exception:
+                    return publish
+            except PlaywrightError:
                 pass
         page.wait_for_timeout(1500)
     raise UploadError("TikTok video işlemeyi 10 dakikada tamamlamadı")
 
 
 def save_diagnostics(page: Page, profile: str, error: Exception) -> Path:
-    folder = DATA_ROOT / "diagnostics" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    folder = DATA_ROOT / "diagnostics" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
     folder.mkdir(parents=True, exist_ok=True)
     try:
         page.screenshot(path=str(folder / "page.png"), full_page=True)
-    except Exception:
+    except PlaywrightError:
         pass
     try:
         (folder / "page.html").write_text(page.content(), encoding="utf-8")
-    except Exception:
+    except PlaywrightError:
         pass
     (folder / "error.json").write_text(json.dumps({
-        "profile": profile, "url": page.url, "error": str(error),
-        "time": datetime.now().isoformat(),
+        "profile": profile,
+        "url": page.url,
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "time": datetime.now(timezone.utc).isoformat(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return folder
 
@@ -182,17 +185,41 @@ def save_diagnostics(page: Page, profile: str, error: Exception) -> Path:
 def launch_context(playwright: Playwright, profile: str) -> BrowserContext:
     profile_dir = DATA_ROOT / "profiles" / safe_profile_name(profile)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    return playwright.chromium.launch_persistent_context(
-        user_data_dir=str(profile_dir),
-        headless=False,
-        channel="chrome",
-        viewport=None,
-        no_viewport=True,
-        args=["--start-maximized"],
+    options = dict(
+        user_data_dir=str(profile_dir), headless=False, viewport=None,
+        no_viewport=True, args=["--start-maximized"],
     )
+    try:
+        return playwright.chromium.launch_persistent_context(channel="chrome", **options)
+    except PlaywrightError as chrome_error:
+        try:
+            return playwright.chromium.launch_persistent_context(**options)
+        except PlaywrightError as bundled_error:
+            raise UploadError(
+                "Chrome ve Playwright Chromium açılamadı. "
+                "`playwright install chromium` komutunu çalıştırın. "
+                f"Chrome: {chrome_error}; Chromium: {bundled_error}"
+            ) from bundled_error
 
 
-def prepare_upload(request: UploadRequest) -> None:
+def wait_for_publish_result(page: Page, timeout_seconds: int = 120) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    success = re.compile(r"posted|published|upload complete|yayınlandı|paylaşıldı", re.I)
+    failure = re.compile(r"failed|error|try again|başarısız|hata|tekrar dene", re.I)
+    while time.monotonic() < deadline:
+        try:
+            text = page.locator("body").inner_text(timeout=2000)
+            if success.search(text) or "upload" not in page.url.lower():
+                return
+            if failure.search(text):
+                raise UploadError("TikTok yayını reddetti. Tarayıcıdaki hata mesajını kontrol edin")
+        except PlaywrightTimeout:
+            pass
+        page.wait_for_timeout(1000)
+    raise UploadError("Yayın sonucu iki dakika içinde doğrulanamadı")
+
+
+def prepare_upload(request: UploadRequest, publish: bool = False) -> None:
     request.validate()
     with sync_playwright() as playwright:
         context = launch_context(playwright, request.profile)
@@ -201,13 +228,20 @@ def prepare_upload(request: UploadRequest) -> None:
             page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
             wait_for_login(page)
             upload_file(page, request.video)
-            fill_caption(page, request.caption)
-            wait_until_ready(page)
+            fill_caption(page, request.caption.strip())
+            button = wait_until_ready(page)
             page.bring_to_front()
-            print("HAZIR: Video ve caption dolduruldu. TikTok ayarlarını kontrol edip Yayınla düğmesine siz basın.")
-            print("Tarayıcıyı kapattığınızda işlem sona erecek.")
-            while context.pages:
-                page.wait_for_timeout(1000)
+            if publish:
+                answer = input(f"Tarayıcı önizlemesini kontrol edin. Yayınlamak için {CONFIRMATION} yazın: ").strip()
+                if answer != CONFIRMATION:
+                    raise UploadError("Yayın kullanıcı tarafından iptal edildi")
+                button.click()
+                wait_for_publish_result(page)
+                print("BAŞARILI: TikTok yayın kabulünü doğruladı.")
+            else:
+                print("HAZIR: Video ve caption dolduruldu. Son kontrol ve Yayınla işlemi tarayıcıda sizde.")
+                while context.pages:
+                    page.wait_for_timeout(1000)
         except Exception as exc:
             folder = save_diagnostics(page, request.profile, exc)
             raise UploadError(f"{exc}\nTanı dosyaları: {folder}") from exc
@@ -217,16 +251,18 @@ def prepare_upload(request: UploadRequest) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="TikTok Studio görünür web yükleme yardımcısı")
-    parser.add_argument("--profile", required=True, help="Yerel tarayıcı profili adı")
-    parser.add_argument("--video", required=True, type=Path, help="Yüklenecek video")
-    parser.add_argument("--caption", help="Caption metni")
-    parser.add_argument("--caption-file", type=Path, help="UTF-8 caption dosyası")
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--video", required=True, type=Path)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--caption")
+    group.add_argument("--caption-file", type=Path)
+    parser.add_argument("--publish", action="store_true", help="Açık metin onayından sonra Yayınla düğmesine bas")
     args = parser.parse_args()
-    caption = args.caption or (args.caption_file.read_text(encoding="utf-8") if args.caption_file else "")
     try:
-        prepare_upload(UploadRequest(args.profile, args.video.expanduser().resolve(), caption))
+        caption = args.caption if args.caption is not None else args.caption_file.read_text(encoding="utf-8-sig")
+        prepare_upload(UploadRequest(args.profile, args.video.expanduser().resolve(), caption), args.publish)
         return 0
-    except Exception as exc:
+    except (OSError, UnicodeError, UploadError) as exc:
         print(f"HATA: {exc}", file=sys.stderr)
         return 1
 
