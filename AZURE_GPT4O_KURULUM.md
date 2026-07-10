@@ -1,6 +1,6 @@
 # Azure GPT-4o caption kurulumu
 
-Caption API alanına Azure GPT-4o anahtarını girin. Uygulama anahtarı işletim sistemi kasasında tutar ve Azure'a `api-key` başlığıyla gönderir.
+Uygulama caption üretimi için yalnızca Azure GPT-4o kullanır. API Ayarları ekranındaki **Azure GPT-4o API Key** alanına yenilenmiş anahtarı girin; anahtar işletim sistemi kasasında saklanır ve Azure'a `api-key` başlığıyla gönderilir.
 
 Varsayılan deployment URL'si hazırdır. Farklı deployment gerekiyorsa:
 
@@ -9,4 +9,4 @@ $env:AZURE_GPT4O_API_URL="https://RESOURCE.cognitiveservices.azure.com/openai/de
 python app_tr.py
 ```
 
-Sohbette veya repoda açık paylaşılmış anahtar iptal edilip yenilenmelidir.
+Eski sağlayıcı adları yalnızca geriye dönük kayıt uyumluluğu için iç değişkenlerde kalabilir; ağ isteği hiçbir zaman bu sağlayıcılara gönderilmez.

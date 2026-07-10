@@ -1,7 +1,8 @@
-"""Route the caption request to Azure GPT-4o.
+"""Azure GPT-4o transport and UI compatibility.
 
-Loaded automatically by Python. Secrets are supplied through the UI/keyring and
-are never stored in this file.
+The legacy caption implementation is retained only for its validation/history
+logic. All inference is sent exclusively to Azure GPT-4o. The UI is relabeled
+at startup so no obsolete provider wording remains visible.
 """
 from __future__ import annotations
 
@@ -31,11 +32,9 @@ if requests is not None and not getattr(requests, "_signaldesk_azure_patch", Fal
             key = authorization.removeprefix("Bearer ").strip()
             if not key:
                 raise RuntimeError("Azure GPT-4o API anahtarı boş")
-
             azure_url = os.getenv("AZURE_GPT4O_API_URL", AZURE_DEFAULT_URL).strip()
             if not azure_url.startswith("https://") or "/chat/completions" not in azure_url:
                 raise RuntimeError("Azure GPT-4o API URL geçersiz")
-
             headers["api-key"] = key
             headers["Content-Type"] = "application/json"
             payload = dict(kwargs.get("json") or {})
@@ -43,8 +42,57 @@ if requests is not None and not getattr(requests, "_signaldesk_azure_patch", Fal
             kwargs["headers"] = headers
             kwargs["json"] = payload
             url = azure_url
-
         return _original_post(url, *args, **kwargs)
 
     requests.post = _azure_caption_post
     requests._signaldesk_azure_patch = True
+
+
+def _azure_text(value: str) -> str:
+    replacements = (
+        ("Profiller + Grok", "Profiller + Azure GPT-4o"),
+        ("Grok caption rehberi", "Azure GPT-4o caption rehberi"),
+        ("Grok API Key", "Azure GPT-4o API Key"),
+        ("Grok API", "Azure GPT-4o API"),
+        ("Grok caption", "Azure GPT-4o caption"),
+        ("GROK CAPTION", "AZURE GPT-4O CAPTION"),
+        ("Grok", "Azure GPT-4o"),
+        ("grok", "Azure GPT-4o"),
+    )
+    for old, new in replacements:
+        value = value.replace(old, new)
+    return value
+
+
+try:
+    from PySide6.QtWidgets import QLabel, QPushButton, QTabWidget
+
+    _label_init = QLabel.__init__
+    _button_init = QPushButton.__init__
+    _insert_tab = QTabWidget.insertTab
+    _add_tab = QTabWidget.addTab
+
+    def _label_azure(self, *args, **kwargs):
+        args = list(args)
+        if args and isinstance(args[0], str):
+            args[0] = _azure_text(args[0])
+        _label_init(self, *args, **kwargs)
+
+    def _button_azure(self, *args, **kwargs):
+        args = list(args)
+        if args and isinstance(args[0], str):
+            args[0] = _azure_text(args[0])
+        _button_init(self, *args, **kwargs)
+
+    def _insert_tab_azure(self, index, widget, label):
+        return _insert_tab(self, index, widget, _azure_text(label))
+
+    def _add_tab_azure(self, widget, label):
+        return _add_tab(self, widget, _azure_text(label))
+
+    QLabel.__init__ = _label_azure
+    QPushButton.__init__ = _button_azure
+    QTabWidget.insertTab = _insert_tab_azure
+    QTabWidget.addTab = _add_tab_azure
+except Exception:
+    pass
