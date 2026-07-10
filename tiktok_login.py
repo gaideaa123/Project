@@ -57,10 +57,18 @@ def _visible(locator, timeout=400):
     try: return bool(locator.count() and locator.first.is_visible(timeout=timeout))
     except (PlaywrightTimeout, PlaywrightError): return False
 
-def _file_ready(page):
+def locator_attached(locator) -> bool:
+    """Playwright Python has no Locator.is_attached(); count is the supported snapshot check."""
     try:
-        field = page.locator('input[type="file"]'); return bool(field.count() and field.first.is_attached())
-    except PlaywrightError: return False
+        return locator.count() > 0
+    except PlaywrightError:
+        return False
+
+def file_input_ready(page) -> bool:
+    try:
+        return locator_attached(page.locator('input[type="file"]'))
+    except PlaywrightError:
+        return False
 
 def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
     deadline = time.monotonic() + timeout_seconds
@@ -68,7 +76,7 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
     attempted = False; last_nav = 0.0
     while time.monotonic() < deadline:
         if page.is_closed(): raise LoginError("TikTok penceresi kapatıldı")
-        if _file_ready(page):
+        if file_input_ready(page):
             if status: status("TikTok oturumu doğrulandı; upload hazır")
             return
         url = page.url.lower(); now = time.monotonic()
@@ -87,6 +95,8 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
 def install(web_uploader: Any):
     if getattr(web_uploader, "_signaldesk_login_installed", False): return
     original_launch, original_prepare = web_uploader.launch_context, web_uploader.prepare_upload
+    # Replace the broken helper used by web_uploader before any page wait begins.
+    web_uploader.file_input_ready = file_input_ready
     def launch(playwright, profile):
         context = original_launch(playwright, profile)
         session_id = load_session(profile)

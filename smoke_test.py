@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import py_compile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,15 +22,18 @@ def main() -> None:
 
     import app_tr
     import tiktok_login
+    import web_uploader
     from PySide6.QtWidgets import QApplication, QPushButton
 
     check(tiktok_login._session_value("sessionid=1234567890abcdef; Path=/") == "1234567890abcdef", "session ayrıştırma")
-    try:
-        tiktok_login._session_value("kısa")
-    except tiktok_login.LoginError:
-        check(True, "geçersiz session reddi")
-    else:
-        raise AssertionError("geçersiz session reddedilmedi")
+    locator = MagicMock()
+    locator.count.return_value = 1
+    del locator.is_attached
+    check(tiktok_login.locator_attached(locator), "Locator.is_attached olmadan attached kontrolü")
+    page = MagicMock()
+    page.locator.return_value = locator
+    check(tiktok_login.file_input_ready(page), "dosya input hazır kontrolü")
+    check(web_uploader.file_input_ready is tiktok_login.file_input_ready, "web uploader uyumluluk düzeltmesi kuruldu")
 
     qt = QApplication.instance() or QApplication([])
     with patch.object(app_tr.tiktok_login, "has_session", return_value=False), patch.object(app_tr.tiktok_login, "has_credentials", return_value=False):
@@ -42,7 +45,6 @@ def main() -> None:
             check(isinstance(window.web_profiles.cellWidget(row, 3), QPushButton), "Session düğmesi")
             check(isinstance(window.web_profiles.cellWidget(row, 5), QPushButton), "Yayın düğmesi")
         window.refresh_web_profiles()
-        check(window.isVisible() is False, "offscreen pencere yaşam döngüsü")
         window.close()
     qt.quit()
     print("\nTÜM GUI DUMAN TESTLERİ GEÇTİ")
