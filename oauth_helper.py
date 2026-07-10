@@ -5,8 +5,8 @@ import hashlib
 import json
 import os
 import secrets
+import string
 import threading
-import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -19,23 +19,26 @@ REDIRECT_URI = os.getenv("TIKTOK_REDIRECT_URI", "http://127.0.0.1:3455/callback/
 SCOPES = os.getenv("TIKTOK_SCOPES", "user.info.basic,video.publish")
 
 
-def b64url(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+def make_verifier(length: int = 64) -> str:
+    """TikTok Desktop PKCE verifier: RFC 7636 unreserved ASCII characters."""
+    alphabet = string.ascii_letters + string.digits + "-._~"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def main() -> None:
     client_key = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
     client_secret = os.getenv("TIKTOK_CLIENT_SECRET", "").strip()
     if not client_key or not client_secret:
-        raise SystemExit("Önce TIKTOK_CLIENT_KEY ve TIKTOK_CLIENT_SECRET ortam değişkenlerini ayarlayın.")
+        raise SystemExit("Önce API Ayarları ekranından Client Key ve Client Secret değerlerini kaydedin.")
 
     parsed = urllib.parse.urlparse(REDIRECT_URI)
     if parsed.hostname not in {"127.0.0.1", "localhost"} or not parsed.port:
-        raise SystemExit("Bu yardımcı yalnızca port içeren localhost yönlendirme adresini destekler.")
+        raise SystemExit("Redirect URI, port içeren 127.0.0.1 veya localhost adresi olmalıdır.")
 
     state = secrets.token_urlsafe(32)
-    verifier = b64url(secrets.token_bytes(64))
-    challenge = b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+    verifier = make_verifier()
+    # TikTok Desktop Login Kit standard base64url yerine SHA-256 HEX digest bekler.
+    challenge = hashlib.sha256(verifier.encode("ascii")).hexdigest()
     result: dict[str, str] = {}
     event = threading.Event()
 
@@ -56,8 +59,8 @@ def main() -> None:
             self.end_headers()
             self.wfile.write(
                 "<html><body style='font-family:system-ui;background:#151813;color:#eee;padding:40px'>"
-                "<h2>Yetkilendirme tamamlandı</h2><p>Bu sekmeyi kapatıp terminale dönebilirsiniz.</p>"
-                "</body></html>".encode("utf-8")
+                "<h2>Yetkilendirme tamamlandı</h2>"
+                "<p>Bu sekmeyi kapatıp terminale dönebilirsiniz.</p></body></html>".encode("utf-8")
             )
             event.set()
 
@@ -65,8 +68,7 @@ def main() -> None:
             return
 
     server = HTTPServer((parsed.hostname, parsed.port), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
     params = {
         "client_key": client_key,
@@ -112,11 +114,9 @@ def main() -> None:
     if not response.ok or "access_token" not in payload:
         raise SystemExit("Belirteç alınamadı:\n" + json.dumps(payload, indent=2, ensure_ascii=False))
 
-    print("\nBAŞARILI. Aşağıdaki değerleri SignalDesk Profil Yönetimi ekranına girin.")
-    print("Erişim belirteci:")
-    print(payload["access_token"])
-    print("\nYenileme belirteci:")
-    print(payload.get("refresh_token", ""))
+    print("\nBAŞARILI. Bu değerleri SignalDesk Profil Yönetimi ekranına girin.")
+    print("Erişim belirteci:\n" + payload["access_token"])
+    print("\nYenileme belirteci:\n" + payload.get("refresh_token", ""))
     print("\nKapsamlar:", payload.get("scope", SCOPES))
     print("Erişim süresi (saniye):", payload.get("expires_in", "bilinmiyor"))
     print("\nBu terminal çıktısını paylaşmayın veya Git'e eklemeyin.")
