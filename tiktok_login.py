@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Profile-scoped TikTok session and visible login assistance."""
+"""Profile-scoped TikTok session and publish-dialog assistance."""
 
 import re
 import time
@@ -11,58 +11,99 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 SERVICE = "signaldesk-tiktok-web-login"
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
+COPYRIGHT_WARNING = re.compile(
+    r"copyright check.*(?:not|hasn't|has not).*finished|"
+    r"copyright check.*in progress|"
+    r"telif hakkı.*(?:henüz )?bitmedi|"
+    r"telif.*kontrol.*(?:tamamlanmadı|devam ediyor)",
+    re.I,
+)
+COPYRIGHT_PUBLISH = re.compile(
+    r"^(publish|post|share|publish now|post now|share now|"
+    r"publish anyway|post anyway|share anyway|continue|"
+    r"yayınla|paylaş|şimdi yayınla|şimdi paylaş|yine de yayınla|yine de paylaş|devam et)$",
+    re.I,
+)
 
-class LoginError(RuntimeError): pass
+
+class LoginError(RuntimeError):
+    pass
+
 
 def _key(profile, field):
     clean = re.sub(r"[^a-zA-Z0-9_.-]+", "-", profile.strip()).strip("-.")[:80]
-    if not clean: raise LoginError("Profil adı geçersiz")
+    if not clean:
+        raise LoginError("Profil adı geçersiz")
     return f"{clean}:{field}"
+
 
 def _session_value(raw):
     value = raw.strip()
     match = re.search(r"(?:^|;\s*)sessionid=([^;\s]+)", value, re.I)
-    if match: value = match.group(1)
+    if match:
+        value = match.group(1)
     if not value or len(value) < 16 or re.search(r"\s", value):
         raise LoginError("Geçerli bir TikTok sessionid girin")
     return value
 
+
 def save_session(profile, value):
     keyring.set_password(SERVICE, _key(profile, "sessionid"), _session_value(value))
 
-def load_session(profile):
-    try: return keyring.get_password(SERVICE, _key(profile, "sessionid")) or ""
-    except Exception: return ""
 
-def has_session(profile): return bool(load_session(profile))
+def load_session(profile):
+    try:
+        return keyring.get_password(SERVICE, _key(profile, "sessionid")) or ""
+    except Exception:
+        return ""
+
+
+def has_session(profile):
+    return bool(load_session(profile))
+
 
 def delete_session(profile):
-    try: keyring.delete_password(SERVICE, _key(profile, "sessionid"))
-    except Exception: pass
+    try:
+        keyring.delete_password(SERVICE, _key(profile, "sessionid"))
+    except Exception:
+        pass
+
 
 def save_credentials(profile, identity, password):
-    if not identity.strip() or not password: raise LoginError("Kullanıcı ve parola birlikte girilmeli")
+    if not identity.strip() or not password:
+        raise LoginError("Kullanıcı ve parola birlikte girilmeli")
     keyring.set_password(SERVICE, _key(profile, "identity"), identity.strip())
     keyring.set_password(SERVICE, _key(profile, "password"), password)
 
+
 def load_credentials(profile):
     try:
-        return (keyring.get_password(SERVICE, _key(profile, "identity")) or "", keyring.get_password(SERVICE, _key(profile, "password")) or "")
-    except Exception: return "", ""
+        return (
+            keyring.get_password(SERVICE, _key(profile, "identity")) or "",
+            keyring.get_password(SERVICE, _key(profile, "password")) or "",
+        )
+    except Exception:
+        return "", ""
+
 
 def has_credentials(profile):
-    identity, password = load_credentials(profile); return bool(identity and password)
+    identity, password = load_credentials(profile)
+    return bool(identity and password)
+
 
 def _visible(locator, timeout=400):
-    try: return bool(locator.count() and locator.first.is_visible(timeout=timeout))
-    except (PlaywrightTimeout, PlaywrightError): return False
+    try:
+        return bool(locator.count() and locator.first.is_visible(timeout=timeout))
+    except (PlaywrightTimeout, PlaywrightError):
+        return False
+
 
 def locator_attached(locator) -> bool:
-    """Playwright Python has no Locator.is_attached(); count is the supported snapshot check."""
     try:
         return locator.count() > 0
     except PlaywrightError:
         return False
+
 
 def file_input_ready(page) -> bool:
     try:
@@ -70,46 +111,113 @@ def file_input_ready(page) -> bool:
     except PlaywrightError:
         return False
 
+
 def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
     deadline = time.monotonic() + timeout_seconds
     identity, password = load_credentials(profile)
-    attempted = False; last_nav = 0.0
+    attempted = False
+    last_navigation = 0.0
     while time.monotonic() < deadline:
-        if page.is_closed(): raise LoginError("TikTok penceresi kapatıldı")
+        if page.is_closed():
+            raise LoginError("TikTok penceresi kapatıldı")
         if file_input_ready(page):
-            if status: status("TikTok oturumu doğrulandı; upload hazır")
+            if status:
+                status("TikTok oturumu doğrulandı; upload hazır")
             return
-        url = page.url.lower(); now = time.monotonic()
+        url = page.url.lower()
+        now = time.monotonic()
         if "/login" in url or _visible(page.locator('input[type="password"]')):
             if identity and password and not attempted:
                 attempted = True
-                if status: status("Session geçersiz; kayıtlı hesapla görünür giriş gerekiyor")
-            page.bring_to_front(); page.wait_for_timeout(1000); continue
-        if "tiktokstudio/upload" not in url and now - last_nav > 4:
-            try: page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
-            except PlaywrightTimeout: pass
-            last_nav = now; continue
+                if status:
+                    status("Session geçersiz; kayıtlı hesapla görünür giriş gerekiyor")
+            page.bring_to_front()
+            page.wait_for_timeout(1000)
+            continue
+        if "tiktokstudio/upload" not in url and now - last_navigation > 4:
+            try:
+                page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
+            except PlaywrightTimeout:
+                pass
+            last_navigation = now
+            continue
         page.wait_for_timeout(750)
     raise LoginError("TikTok session/giriş doğrulaması tamamlanmadı")
 
+
+def handle_copyright_publish_dialog(page, timeout_seconds: float = 12.0) -> bool:
+    """Click the explicit publish action in TikTok's copyright-check warning dialog."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        dialogs = page.get_by_role("dialog")
+        try:
+            count = min(dialogs.count(), 5)
+        except PlaywrightError:
+            count = 0
+        for index in range(count):
+            dialog = dialogs.nth(index)
+            try:
+                if not dialog.is_visible(timeout=200):
+                    continue
+                text = dialog.inner_text(timeout=1000)
+                if not COPYRIGHT_WARNING.search(text):
+                    continue
+                buttons = dialog.get_by_role("button", name=COPYRIGHT_PUBLISH)
+                if buttons.count() and buttons.first.is_visible(timeout=400):
+                    buttons.first.click(timeout=5000)
+                    return True
+                # Fallback remains inside the verified copyright dialog only.
+                fallback = dialog.locator("button").filter(has_text=COPYRIGHT_PUBLISH)
+                if fallback.count() and fallback.first.is_visible(timeout=400):
+                    fallback.first.click(timeout=5000)
+                    return True
+                raise LoginError("Telif kontrolü uyarısı görüldü ama Paylaş düğmesi bulunamadı")
+            except PlaywrightTimeout:
+                continue
+        page.wait_for_timeout(200)
+    return False
+
+
 def install(web_uploader: Any):
-    if getattr(web_uploader, "_signaldesk_login_installed", False): return
-    original_launch, original_prepare = web_uploader.launch_context, web_uploader.prepare_upload
-    # Replace the broken helper used by web_uploader before any page wait begins.
+    if getattr(web_uploader, "_signaldesk_login_installed", False):
+        return
+    original_launch = web_uploader.launch_context
+    original_prepare = web_uploader.prepare_upload
+    original_confirm = web_uploader.confirm_publish_dialog
     web_uploader.file_input_ready = file_input_ready
+
     def launch(playwright, profile):
         context = original_launch(playwright, profile)
         session_id = load_session(profile)
         if session_id:
-            context.add_cookies([{"name":"sessionid","value":session_id,"domain":".tiktok.com","path":"/","secure":True,"httpOnly":True,"sameSite":"Lax"}])
+            context.add_cookies([{
+                "name": "sessionid", "value": session_id, "domain": ".tiktok.com",
+                "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
+            }])
         return context
+
+    def confirm_publish_dialog(page):
+        if handle_copyright_publish_dialog(page):
+            return
+        original_confirm(page)
+
     def prepare(request, publish=False, approval=None, status=None):
         original_wait = web_uploader.wait_for_upload_after_login
+
         def waiter(page, timeout_seconds=900, status=None):
-            return wait_for_upload_after_login(page, timeout_seconds, status, request.profile)
+            return wait_for_upload_after_login(
+                page, timeout_seconds, status, request.profile
+            )
+
         web_uploader.wait_for_upload_after_login = waiter
-        try: return original_prepare(request, publish=publish, approval=approval, status=status)
-        finally: web_uploader.wait_for_upload_after_login = original_wait
+        try:
+            return original_prepare(
+                request, publish=publish, approval=approval, status=status
+            )
+        finally:
+            web_uploader.wait_for_upload_after_login = original_wait
+
     web_uploader.launch_context = launch
+    web_uploader.confirm_publish_dialog = confirm_publish_dialog
     web_uploader.prepare_upload = prepare
     web_uploader._signaldesk_login_installed = True
