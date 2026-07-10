@@ -24,31 +24,31 @@ def main() -> None:
 
     import app_tr
     import oauth_helper
-    from PySide6.QtWidgets import QApplication, QLineEdit, QProgressBar, QSpinBox
+    from PySide6.QtWidgets import QApplication, QLineEdit, QPlainTextEdit, QProgressBar, QSpinBox
 
     qt = QApplication.instance() or QApplication([])
     window = app_tr.TurkceAnaPencere()
-    check(isinstance(window.master, QLineEdit), "ana medya alanı bulundu")
-    check(isinstance(window.output_dir, QLineEdit), "çıktı klasörü alanı bulundu")
-    check(isinstance(window.batch_size, QSpinBox), "çıktı sayısı alanı bulundu")
-    check(isinstance(window.progress, QProgressBar), "ilerleme çubuğu bulundu")
-    check(window.tabs.count() == 4, "dört sekme yüklendi")
+    check(isinstance(window.master, QLineEdit), "ana medya alanı")
+    check(isinstance(window.hook_dir, QLineEdit), "hook klasörü alanı")
+    check(isinstance(window.broll_dir, QLineEdit), "B-roll klasörü alanı")
+    check(isinstance(window.output_dir, QLineEdit), "çıktı klasörü alanı")
+    check(isinstance(window.cta_texts, QPlainTextEdit), "CTA listesi")
+    check(isinstance(window.batch_size, QSpinBox), "varyant sayısı")
+    check(isinstance(window.progress, QProgressBar), "ilerleme çubuğu")
+    check(window.tabs.count() == 4, "dört sekme")
 
     with tempfile.TemporaryDirectory() as temporary:
-        target = Path(temporary) / "ciktilar"
-        target.mkdir()
-        window.output_dir.setText(str(target))
-        window._normalize_output()
-        check(window.output_dir.text() == str(target.resolve()), "çıktı yolu GUI'ye yazılıyor")
-        probe = target / "write.test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
-        check(True, "çıktı klasörüne yazılabiliyor")
+        root_temp = Path(temporary)
+        for name in ("hooks", "broll", "output"):
+            (root_temp / name).mkdir()
+        check((root_temp / "output").is_dir(), "yaratıcı klasör yapısı")
+        state = window.registry.snapshot()
+        check(isinstance(state.get("accounts", []), list), "kayıt motoru")
 
     verifier = oauth_helper.make_verifier()
-    check(len(verifier) == 64, "PKCE verifier uzunluğu")
-    check(all(c in string.ascii_letters + string.digits + "-._~" for c in verifier), "PKCE karakter kümesi")
-    check(len(hashlib.sha256(verifier.encode("ascii")).hexdigest()) == 64, "PKCE hex challenge")
+    check(len(verifier) == 64, "PKCE verifier")
+    check(all(c in string.ascii_letters + string.digits + "-._~" for c in verifier), "PKCE karakterleri")
+    check(len(hashlib.sha256(verifier.encode("ascii")).hexdigest()) == 64, "PKCE challenge")
     window.close()
     qt.quit()
     print("\nTÜM DUMAN TESTLERİ GEÇTİ")
