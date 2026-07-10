@@ -25,17 +25,6 @@ REDIRECT = "http://127.0.0.1:3455/callback/"
 KAPSAMLAR = "user.info.basic,video.publish"
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
-CEVIRI = {
-    "Profiles": "Profil Yönetimi", "Accounts": "Profil Yönetimi",
-    "Asset processing": "Tek Tık Video", "Processing": "Tek Tık Video",
-    "Deployment queue": "Yayın Kuyruğu", "Scheduler": "Yayın Kuyruğu",
-    "Choose video": "Input video seç", "Select master": "Input video seç",
-    "Render outputs": "Tek tıkla varyant oluştur", "Start batch": "Tek tıkla varyant oluştur",
-    "Live operations log": "Üretim günlüğü", "Processing log": "Üretim günlüğü",
-    "Browse": "Gözat", "Caption": "Açıklama", "Run at": "Yayın zamanı",
-    "Queue post": "Yayını kuyruğa ekle", "Run due now": "Zamanı gelenleri çalıştır",
-}
-
 
 def kasa_oku(ad: str, varsayilan: str = "") -> str:
     try:
@@ -56,33 +45,28 @@ def ayarlari_yukle() -> None:
             os.environ[name] = value
 
 
-def _ffmpeg_ready() -> bool:
-    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
-
-
 class OneClickVariantEngine:
-    """Creates real editorial variants from one source without extra asset setup."""
-
     def __init__(self, registry: Any, logger: Any):
         self.registry = registry
         self.logger = logger
 
     @staticmethod
-    def _probe(path: Path) -> tuple[float, bool]:
+    def probe(path: Path) -> tuple[float, bool]:
         data = ffmpeg.probe(str(path))
         duration = float(data.get("format", {}).get("duration") or 0)
-        has_audio = any(stream.get("codec_type") == "audio" for stream in data.get("streams", []))
+        audio = any(stream.get("codec_type") == "audio" for stream in data.get("streams", []))
         if duration <= 0:
             raise RuntimeError(f"Video süresi okunamadı: {path.name}")
-        return duration, has_audio
+        return duration, audio
 
     def render(self, source: Path, output: Path, count: int, signals: Any) -> list[str]:
-        if not _ffmpeg_ready():
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             raise RuntimeError("FFmpeg ve FFprobe PATH üzerinde bulunamadı")
         if not source.is_file() or source.suffix.lower() not in MEDIA_EXTENSIONS:
             raise RuntimeError("Geçerli bir input video seçin")
+
         output.mkdir(parents=True, exist_ok=True)
-        duration, has_audio = self._probe(source)
+        duration, has_audio = self.probe(source)
         rng = random.SystemRandom()
         results: list[str] = []
 
@@ -125,7 +109,6 @@ class OneClickVariantEngine:
             completed = subprocess.run(command, capture_output=True, text=True)
             if completed.returncode:
                 raise RuntimeError(completed.stderr.strip() or "FFmpeg üretimi başarısız")
-
             results.append(str(target.resolve()))
             signals.progress.emit(round((index + 1) * 100 / count))
         return results
@@ -135,86 +118,57 @@ class TurkceAnaPencere(core.MainWindow):
     def build_ui(self) -> None:
         super().build_ui()
         self.setWindowTitle("SignalDesk Tek Tık Video")
-        self._discover_processing_widgets()
-        self._add_output_control()
         self.variant_engine = OneClickVariantEngine(self.registry, self.logger)
+        self.tabs.insertTab(1, self._one_click_tab(), "Tek Tık Video")
         self.tabs.addTab(self._api_tab(), "API Ayarları")
-        self._translate()
 
-    def _processing_page(self) -> QWidget:
-        if not hasattr(self, "tabs") or self.tabs.count() < 2:
-            raise RuntimeError("Medya sekmesi bulunamadı")
-        return self.tabs.widget(1)
+    def _one_click_tab(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("Input ve output seç, gerisini tek tıkla hallet")
+        title.setStyleSheet("font-size: 20px; font-weight: 700")
+        outer.addWidget(title)
 
-    def _discover_processing_widgets(self) -> None:
-        page = self._processing_page()
-        edits = page.findChildren(QLineEdit)
-        spins = page.findChildren(QSpinBox)
-        bars = page.findChildren(QProgressBar)
+        panel = QFrame()
+        panel.setObjectName("panel")
+        layout = QVBoxLayout(panel)
+        form = QFormLayout()
 
-        def valid(value: object, kind: type) -> Any:
-            return value if isinstance(value, kind) else None
+        self.master = QLineEdit()
+        self.master.setPlaceholderText("Input video")
+        input_button = QPushButton("Input seç")
+        input_button.clicked.connect(self.choose_master)
+        input_row = QHBoxLayout()
+        input_row.addWidget(self.master, 1)
+        input_row.addWidget(input_button)
+        form.addRow("Input", input_row)
 
-        self.master = (
-            valid(getattr(self, "master", None), QLineEdit)
-            or valid(getattr(self, "master_video", None), QLineEdit)
-            or valid(getattr(self, "source_video", None), QLineEdit)
-            or (edits[0] if edits else None)
-        )
-        self.batch_size = (
-            valid(getattr(self, "batch_size", None), QSpinBox)
-            or valid(getattr(self, "variant_count", None), QSpinBox)
-            or (spins[0] if spins else None)
-        )
-        self.progress = (
-            valid(getattr(self, "progress", None), QProgressBar)
-            or valid(getattr(self, "render_progress", None), QProgressBar)
-            or (bars[0] if bars else None)
-        )
-
-        layout = page.layout()
-        if self.master is None:
-            self.master = QLineEdit()
-            self.master.setPlaceholderText("Input video")
-            if layout:
-                layout.addWidget(self.master)
-        if self.batch_size is None:
-            self.batch_size = QSpinBox()
-            if layout:
-                layout.addWidget(self.batch_size)
-        if self.progress is None:
-            self.progress = QProgressBar()
-            if layout:
-                layout.addWidget(self.progress)
-
-        self.batch_size.setRange(1, 100)
-        if self.batch_size.value() < 1:
-            self.batch_size.setValue(5)
-        self.batch_size.setSuffix(" varyant")
-
-    def _processing_layout(self):
-        page = self._processing_page()
-        frames = [frame for frame in page.findChildren(QFrame) if frame.layout()]
-        return frames[0].layout() if frames else page.layout()
-
-    def _add_output_control(self) -> None:
         self.output_dir = QLineEdit()
         self.output_dir.setPlaceholderText("Output klasörü")
-        self.output_dir.setClearButtonEnabled(True)
-        button = QPushButton("Output seç")
-        button.clicked.connect(self.choose_output)
-        row = QHBoxLayout()
-        row.addWidget(self.output_dir, 1)
-        row.addWidget(button)
-        layout = self._processing_layout()
-        if layout:
-            layout.insertLayout(max(1, layout.count() - 2), row)
+        output_button = QPushButton("Output seç")
+        output_button.clicked.connect(self.choose_output)
+        output_row = QHBoxLayout()
+        output_row.addWidget(self.output_dir, 1)
+        output_row.addWidget(output_button)
+        form.addRow("Output", output_row)
 
-    def choose_output(self) -> None:
-        initial = self.output_dir.text().strip() or str(Path.home())
-        selected = QFileDialog.getExistingDirectory(self, "Output klasörünü seç", initial)
-        if selected:
-            self.output_dir.setText(str(Path(selected).resolve()))
+        self.batch_size = QSpinBox()
+        self.batch_size.setRange(1, 100)
+        self.batch_size.setValue(5)
+        self.batch_size.setSuffix(" varyant")
+        form.addRow("Adet", self.batch_size)
+        layout.addLayout(form)
+
+        self.render_button = QPushButton("TEK TIKLA VARYANT OLUŞTUR")
+        self.render_button.setMinimumHeight(48)
+        self.render_button.clicked.connect(self.start_batch)
+        layout.addWidget(self.render_button)
+        self.progress = QProgressBar()
+        layout.addWidget(self.progress)
+        outer.addWidget(panel)
+        outer.addStretch()
+        return page
 
     def choose_master(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -226,24 +180,28 @@ class TurkceAnaPencere(core.MainWindow):
             if not self.output_dir.text().strip():
                 self.output_dir.setText(str(source.parent / f"{source.stem}-variants"))
 
+    def choose_output(self) -> None:
+        initial = self.output_dir.text().strip() or str(Path.home())
+        selected = QFileDialog.getExistingDirectory(self, "Output klasörünü seç", initial)
+        if selected:
+            self.output_dir.setText(str(Path(selected).resolve()))
+
     def start_batch(self) -> None:
         source = Path(self.master.text().strip())
         if not source.is_file():
-            self.error("Input bulunamadı", "Geçerli bir video seçin")
+            QMessageBox.warning(self, "Input bulunamadı", "Geçerli bir video seçin")
             return
-        output_text = self.output_dir.text().strip()
-        output = Path(output_text) if output_text else source.parent / f"{source.stem}-variants"
+        output = Path(self.output_dir.text().strip()) if self.output_dir.text().strip() else source.parent / f"{source.stem}-variants"
         self.output_dir.setText(str(output.resolve()))
-        count = self.batch_size.value()
-        button = getattr(self, "render_button", None)
-        if button:
-            button.setEnabled(False)
+        self.render_button.setEnabled(False)
         self.progress.setValue(0)
-        task = core.BackgroundTask(lambda signals: self.variant_engine.render(source, output, count, signals))
+        task = core.BackgroundTask(
+            lambda signals: self.variant_engine.render(source, output, self.batch_size.value(), signals)
+        )
         task.signals.log.connect(self.log)
         task.signals.progress.connect(self.progress.setValue)
         task.signals.result.connect(self._variant_done)
-        task.signals.error.connect(lambda detail: self.error("Üretim başarısız", detail))
+        task.signals.error.connect(lambda detail: QMessageBox.critical(self, "Üretim başarısız", detail))
         task.signals.finished.connect(lambda current=task: self._variant_finished(current))
         self.tasks.add(task)
         task.start()
@@ -253,20 +211,17 @@ class TurkceAnaPencere(core.MainWindow):
 
     def _variant_done(self, outputs: object) -> None:
         self.last_outputs = list(outputs or [])
-        queue_field = getattr(self, "queue_video", getattr(self, "schedule_video", None))
-        if queue_field is not None and self.last_outputs:
-            queue_field.setText(self.last_outputs[0])
-        self.log(f"{len(self.last_outputs)} varyant hazır: {self.output_dir.text()}")
+        QMessageBox.information(
+            self, "Hazır", f"{len(self.last_outputs)} varyant oluşturuldu.\n{self.output_dir.text()}"
+        )
 
     def _variant_finished(self, task: object) -> None:
         self.tasks.discard(task)
-        button = getattr(self, "render_button", None)
-        if button:
-            button.setEnabled(True)
+        self.render_button.setEnabled(True)
 
     def _api_tab(self) -> QWidget:
         page = QWidget()
-        outer = QHBoxLayout(page)
+        outer = QVBoxLayout(page)
         panel = QFrame()
         layout = QVBoxLayout(panel)
         layout.addWidget(QLabel("TikTok API ve OAuth Ayarları"))
@@ -285,6 +240,7 @@ class TurkceAnaPencere(core.MainWindow):
         save.clicked.connect(self.save_api)
         layout.addWidget(save)
         outer.addWidget(panel)
+        outer.addStretch()
         return page
 
     def save_api(self) -> None:
@@ -301,33 +257,6 @@ class TurkceAnaPencere(core.MainWindow):
             keyring.set_password(AYAR_SERVISI, name, value)
         ayarlari_yukle()
         QMessageBox.information(self, "Kaydedildi", "API ayarları güvenli kasaya kaydedildi")
-
-    def _translate(self) -> None:
-        names = ("Profil Yönetimi", "Tek Tık Video", "Yayın Kuyruğu", "API Ayarları")
-        for index, name in enumerate(names):
-            if index < self.tabs.count():
-                self.tabs.setTabText(index, name)
-        for label in self.findChildren(QLabel):
-            label.setText(CEVIRI.get(label.text(), label.text()))
-        for button in self.findChildren(QPushButton):
-            button.setText(CEVIRI.get(button.text(), button.text()))
-
-    def refresh(self) -> None:
-        parent = getattr(super(), "refresh", None)
-        if callable(parent):
-            parent()
-        else:
-            fallback = getattr(super(), "refresh_all", None)
-            if callable(fallback):
-                fallback()
-        self._translate()
-
-    def error(self, title: str, details: str) -> None:
-        parent = getattr(super(), "error", None)
-        if callable(parent):
-            parent(title, details)
-        else:
-            QMessageBox.critical(self, title, details)
 
 
 def main() -> int:
