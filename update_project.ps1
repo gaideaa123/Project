@@ -1,41 +1,31 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-
 $repo = "https://raw.githubusercontent.com/gaideaa123/Project/main"
 $files = @(
-    "app.py",
-    "app_tr.py",
-    "oauth_helper.py",
-    "smoke_test.py",
-    "requirements.txt",
-    "README.md",
-    "TURKCE_KURULUM.md",
-    ".gitignore"
+    "app.py", "app_tr.py", "run_tr.py", "oauth_helper.py", "smoke_test.py",
+    "requirements.txt", "README.md", "TURKCE_KURULUM.md", ".gitignore"
 )
 
-Write-Host "SignalDesk dosyalari guncelleniyor..." -ForegroundColor Cyan
-
+Write-Host "SignalDesk dosyalari ayni surume getiriliyor..." -ForegroundColor Cyan
 foreach ($file in $files) {
-    $url = "$repo/$file"
     $target = Join-Path $PSScriptRoot $file
     $temporary = "$target.download"
-    Write-Host "  -> $file"
-    Invoke-WebRequest -Uri $url -OutFile $temporary -UseBasicParsing
-    if ((Get-Item $temporary).Length -eq 0) {
-        throw "$file bos indirildi"
-    }
-    Move-Item -Path $temporary -Destination $target -Force
+    Invoke-WebRequest -Uri "$repo/$file" -OutFile $temporary -UseBasicParsing
+    if ((Get-Item $temporary).Length -eq 0) { throw "$file bos indirildi" }
+    Move-Item $temporary $target -Force
+    Write-Host "  OK $file"
 }
 
-Write-Host "Bagimliliklar dogrulaniyor..." -ForegroundColor Cyan
-& "$PSScriptRoot\.venv\Scripts\python.exe" -m pip install -r "$PSScriptRoot\requirements.txt"
-if ($LASTEXITCODE -ne 0) { throw "pip install basarisiz" }
+$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $python)) { throw ".venv bulunamadi. Once: py -3.11 -m venv .venv" }
+& $python -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "Bagimlilik kurulumu basarisiz" }
 
-Write-Host "Duman testleri calistiriliyor..." -ForegroundColor Cyan
 $env:QT_QPA_PLATFORM = "offscreen"
-& "$PSScriptRoot\.venv\Scripts\python.exe" "$PSScriptRoot\smoke_test.py"
-if ($LASTEXITCODE -ne 0) { throw "Duman testi basarisiz" }
+& $python (Join-Path $PSScriptRoot "smoke_test.py")
+$testCode = $LASTEXITCODE
 Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
+if ($testCode -ne 0) { throw "Duman testi basarisiz" }
 
-Write-Host "`nGuncelleme tamam. Uygulamayi acmak icin:" -ForegroundColor Green
-Write-Host ".\.venv\Scripts\python.exe .\app_tr.py" -ForegroundColor Yellow
+Write-Host "`nHazir. Turkce uygulamayi su komutla ac:" -ForegroundColor Green
+Write-Host ".\.venv\Scripts\python.exe .\run_tr.py" -ForegroundColor Yellow
