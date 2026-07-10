@@ -58,16 +58,16 @@ def _visual_chain(label: str, speed: float, zoom: float, saturation: float,
     timing = "setpts=PTS-STARTPTS" if teaser else f"setpts=(PTS-STARTPTS)/{speed:.6f}"
     return (
         f"[{label}:v]{timing},"
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        f"scale=iw*{zoom:.6f}:ih*{zoom:.6f},"
+        "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"scale=iw*{zoom:.6f}:ih*{zoom:.6f}:flags=lanczos,"
         "crop=1080:1920,"
         f"eq=saturation={saturation:.6f}:contrast={contrast:.6f}:brightness={brightness:.6f},"
-        "unsharp=5:5:0.20:3:3:0.0,format=yuv420p"
+        "unsharp=5:5:0.20:3:3:0.0,"
+        "fps=30,settb=AVTB,setsar=1,format=yuv420p"
     )
 
 
 def varyant_uret(source: Path, output: Path, count: int, progress, status) -> list[str]:
-    """Create editorial variants with an automatic teaser opening, never mirroring."""
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg ve FFprobe PATH üzerinde bulunamadı")
     if not source.is_file() or source.suffix.lower() not in MEDIA_EXTENSIONS:
@@ -99,8 +99,11 @@ def varyant_uret(source: Path, output: Path, count: int, progress, status) -> li
         ]
         if has_audio:
             filter_parts += [
-                "[0:a]asetpts=PTS-STARTPTS,aresample=48000[teaser_a]",
-                f"[1:a]asetpts=PTS-STARTPTS,atempo={speed:.6f},aresample=48000,"
+                "[0:a]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,"
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[teaser_a]",
+                f"[1:a]asetpts=PTS-STARTPTS,atempo={speed:.6f},"
+                "aresample=48000:async=1:first_pts=0,"
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
                 "loudnorm=I=-14:TP=-1.5:LRA=11[main_a]",
                 "[teaser_a][main_a]concat=n=2:v=0:a=1[out_a]",
             ]
@@ -117,15 +120,21 @@ def varyant_uret(source: Path, output: Path, count: int, progress, status) -> li
         command += [
             "-c:v", "libx264", "-preset", "medium", "-crf", "21",
             "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+            "-r", "30", "-vsync", "cfr",
         ]
         if has_audio:
-            command += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
-        command += ["-movflags", "+faststart", "-map_metadata", "-1", str(target)]
+            command += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        command += ["-movflags", "+faststart", "-map_metadata", "-1", "-shortest", str(target)]
 
-        status(f"{index + 1}/{count}: otomatik cold-open + ana kurgu")
+        status(f"{index + 1}/{count}: cold-open + normalize edilmiş ana kurgu")
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode:
+            if target.exists():
+                target.unlink(missing_ok=True)
             raise RuntimeError(completed.stderr.strip() or "FFmpeg üretimi başarısız")
+        if not target.exists() or target.stat().st_size == 0:
+            target.unlink(missing_ok=True)
+            raise RuntimeError("FFmpeg boş çıktı üretti")
         results.append(str(target.resolve()))
         progress(round((index + 1) * 100 / count))
     return results
@@ -176,7 +185,6 @@ class TurkceAnaPencere(core.MainWindow):
         panel.setObjectName("panel")
         layout = QVBoxLayout(panel)
         form = QFormLayout()
-
         self.master = QLineEdit()
         self.master.setPlaceholderText("Input video")
         input_button = QPushButton("Input seç")
@@ -215,9 +223,7 @@ class TurkceAnaPencere(core.MainWindow):
         return page
 
     def choose_master(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Input video seç", "", "Video (*.mp4 *.mov *.mkv *.webm *.m4v)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Input video seç", "", "Video (*.mp4 *.mov *.mkv *.webm *.m4v)")
         if path:
             source = Path(path).resolve()
             self.master.setText(str(source))
