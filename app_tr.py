@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 import random
 import re
 import sys
@@ -36,8 +34,7 @@ def secret(name: str, default: str = "") -> str:
 
 class AzureTitleClient:
     def __init__(self, key: str, url: str, guide: str):
-        self.key = key.strip()
-        self.url = url.strip()
+        self.key, self.url = key.strip(), url.strip()
         self.guide = guide.strip() or DEFAULT_GUIDE
         if not self.key:
             raise RuntimeError("Azure GPT API anahtarı boş")
@@ -46,7 +43,7 @@ class AzureTitleClient:
 
     def create(self, profile: str) -> str:
         prompt = (
-            "Yalnızca TikTok başlığı/caption metnini döndür. Markdown veya açıklama ekleme.\n"
+            "Yalnız TikTok başlığı/caption metnini döndür; markdown veya açıklama ekleme.\n"
             f"Profil: {profile}\nKurallar: {self.guide}\n"
             f"Çeşitlilik anahtarı: {random.SystemRandom().randrange(10**12)}"
         )
@@ -74,10 +71,8 @@ class AzureTitleClient:
                     detail = error.get("message") if isinstance(error, dict) else str(error)
                     raise RuntimeError(detail or f"Azure HTTP {response.status_code}")
                 caption = str(payload["choices"][0]["message"]["content"]).strip().strip('"')
-                if not caption or len(caption) > 2200:
-                    raise RuntimeError("Azure boş veya 2200 karakterden uzun metin döndürdü")
-                if not re.search(r"\w", caption, re.UNICODE):
-                    raise RuntimeError("Azure kullanılabilir bir başlık döndürmedi")
+                if not caption or len(caption) > 2200 or not re.search(r"\w", caption, re.UNICODE):
+                    raise RuntimeError("Azure kullanılabilir uzunlukta bir başlık döndürmedi")
                 return caption
             except (requests.RequestException, KeyError, IndexError, TypeError, RuntimeError) as exc:
                 last_error = str(exc)
@@ -93,11 +88,8 @@ class PublishWorker(QThread):
 
     def __init__(self, profiles: list[str], video: Path, key: str, url: str, guide: str, parent=None):
         super().__init__(parent)
-        self.profiles = profiles
-        self.video = video
-        self.key = key
-        self.url = url
-        self.guide = guide
+        self.profiles, self.video = profiles, video
+        self.key, self.url, self.guide = key, url, guide
         self._decision = threading.Event()
         self._approved = False
         self._cancelled = False
@@ -135,6 +127,11 @@ class PublishWorker(QThread):
                 completed += 1
                 self.profile_done.emit(profile)
             self.all_done.emit(completed)
+        except web_uploader.UploadError as exc:
+            if self._cancelled or "iptal" in str(exc).casefold():
+                self.all_done.emit(completed)
+            else:
+                self.failed.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -158,49 +155,33 @@ class TurkceAnaPencere(core.MainWindow):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
-
         settings = QFormLayout()
-        self.azure_key = QLineEdit(secret("api_key"))
-        self.azure_key.setEchoMode(QLineEdit.Password)
+        self.azure_key = QLineEdit(secret("api_key")); self.azure_key.setEchoMode(QLineEdit.Password)
         self.azure_url = QLineEdit(secret("api_url"))
         self.azure_guide = QLineEdit(secret("guide", DEFAULT_GUIDE))
         settings.addRow("Azure API Key", self.azure_key)
         settings.addRow("Azure chat/completions URL", self.azure_url)
         settings.addRow("Başlık kuralları", self.azure_guide)
         layout.addLayout(settings)
-
-        media_row = QHBoxLayout()
-        self.web_video = QLineEdit()
-        self.web_video.setPlaceholderText("Yüklenecek video")
-        choose = QPushButton("Video seç")
-        choose.clicked.connect(self.choose_web_video)
-        media_row.addWidget(self.web_video, 1)
-        media_row.addWidget(choose)
-        layout.addLayout(media_row)
-
+        media = QHBoxLayout()
+        self.web_video = QLineEdit(); self.web_video.setPlaceholderText("Yüklenecek video")
+        choose = QPushButton("Video seç"); choose.clicked.connect(self.choose_web_video)
+        media.addWidget(self.web_video, 1); media.addWidget(choose); layout.addLayout(media)
         controls = QHBoxLayout()
-        save = QPushButton("Azure ayarlarını kaydet")
-        save.clicked.connect(self.save_azure)
-        select_all = QPushButton("Tümünü seç")
-        select_all.clicked.connect(self.select_all_profiles)
-        publish_all = QPushButton("SEÇİLENLERİ AZURE + WEB İLE YAYINLA")
-        publish_all.clicked.connect(self.publish_selected)
-        self.cancel_publish = QPushButton("İptal")
-        self.cancel_publish.setEnabled(False)
+        save = QPushButton("Azure ayarlarını kaydet"); save.clicked.connect(self.save_azure)
+        select_all = QPushButton("Tümünü seç"); select_all.clicked.connect(self.select_all_profiles)
+        publish_all = QPushButton("SEÇİLENLERİ AZURE + WEB İLE YAYINLA"); publish_all.clicked.connect(self.publish_selected)
+        self.cancel_publish = QPushButton("İptal"); self.cancel_publish.setEnabled(False)
         self.cancel_publish.clicked.connect(self.cancel_current)
-        controls.addWidget(save)
-        controls.addWidget(select_all)
-        controls.addWidget(publish_all)
-        controls.addWidget(self.cancel_publish)
+        for button in (save, select_all, publish_all, self.cancel_publish):
+            controls.addWidget(button)
         layout.addLayout(controls)
-
         self.web_profiles = QTableWidget(0, 4)
         self.web_profiles.setHorizontalHeaderLabels(["Seç", "Profil", "Durum", "İşlem"])
         self.web_profiles.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.web_profiles.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         layout.addWidget(self.web_profiles)
-        self.web_status = QLabel("Hazır")
-        layout.addWidget(self.web_status)
+        self.web_status = QLabel("Hazır"); layout.addWidget(self.web_status)
         return page
 
     def refresh(self) -> None:
@@ -213,8 +194,7 @@ class TurkceAnaPencere(core.MainWindow):
         self.web_profiles.setRowCount(len(accounts))
         for row, account in enumerate(accounts):
             name = str(account.get("name") or account.get("profile_name") or "TikTok")
-            box = QCheckBox()
-            self.web_profiles.setCellWidget(row, 0, box)
+            self.web_profiles.setCellWidget(row, 0, QCheckBox())
             self.web_profiles.setItem(row, 1, QTableWidgetItem(name))
             self.web_profiles.setItem(row, 2, QTableWidgetItem("Hazır"))
             button = QPushButton("Azure + Web ile yayınla")
@@ -222,18 +202,13 @@ class TurkceAnaPencere(core.MainWindow):
             self.web_profiles.setCellWidget(row, 3, button)
 
     def choose_web_video(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Yüklenecek videoyu seç", "", "Video (*.mp4 *.mov *.m4v *.webm)"
-        )
+        filename, _ = QFileDialog.getOpenFileName(self, "Yüklenecek videoyu seç", "", "Video (*.mp4 *.mov *.m4v *.webm)")
         if filename:
             self.web_video.setText(str(Path(filename).resolve()))
 
     def save_azure(self, show_message: bool = True) -> bool:
-        values = {
-            "api_key": self.azure_key.text().strip(),
-            "api_url": self.azure_url.text().strip(),
-            "guide": self.azure_guide.text().strip() or DEFAULT_GUIDE,
-        }
+        values = {"api_key": self.azure_key.text().strip(), "api_url": self.azure_url.text().strip(),
+                  "guide": self.azure_guide.text().strip() or DEFAULT_GUIDE}
         try:
             AzureTitleClient(values["api_key"], values["api_url"], values["guide"])
             for name, value in values.items():
@@ -254,8 +229,7 @@ class TurkceAnaPencere(core.MainWindow):
     def publish_selected(self) -> None:
         profiles = []
         for row in range(self.web_profiles.rowCount()):
-            box = self.web_profiles.cellWidget(row, 0)
-            item = self.web_profiles.item(row, 1)
+            box, item = self.web_profiles.cellWidget(row, 0), self.web_profiles.item(row, 1)
             if isinstance(box, QCheckBox) and box.isChecked() and item:
                 profiles.append(item.text())
         self.publish_profiles(profiles)
@@ -271,54 +245,49 @@ class TurkceAnaPencere(core.MainWindow):
         try:
             web_uploader.UploadRequest(profiles[0], video, "doğrulama").validate()
         except Exception as exc:
-            QMessageBox.warning(self, "Video hatası", str(exc))
-            return
+            QMessageBox.warning(self, "Video hatası", str(exc)); return
         if not self.save_azure(False):
             return
-        self.publish_worker = PublishWorker(
-            profiles, video.resolve(), self.azure_key.text(), self.azure_url.text(),
-            self.azure_guide.text(), self,
-        )
-        self.publish_worker.status.connect(self.web_status.setText)
-        self.publish_worker.preview_ready.connect(self.confirm_preview)
-        self.publish_worker.profile_done.connect(self.mark_done)
-        self.publish_worker.failed.connect(self.publish_failed)
-        self.publish_worker.all_done.connect(self.publish_finished)
+        worker = PublishWorker(profiles, video.resolve(), self.azure_key.text(), self.azure_url.text(),
+                               self.azure_guide.text(), self)
+        self.publish_worker = worker
+        worker.status.connect(self.web_status.setText)
+        worker.preview_ready.connect(self.confirm_preview)
+        worker.profile_done.connect(self.mark_done)
+        worker.failed.connect(self.publish_failed)
+        worker.all_done.connect(self.publish_finished)
+        worker.finished.connect(self.cleanup_worker)
         self.cancel_publish.setEnabled(True)
-        self.publish_worker.start()
+        worker.start()
 
     def confirm_preview(self, profile: str, video: str, caption: str) -> None:
         answer = QMessageBox.question(
-            self,
-            f"{profile}: son yayın onayı",
+            self, f"{profile}: son yayın onayı",
             f"Tarayıcıdaki önizlemeyi kontrol et.\n\nVideo: {video}\n\nBaşlık:\n{caption}\n\n"
             "Şimdi TikTok'taki Yayınla düğmesine basılsın mı?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if self.publish_worker:
             self.publish_worker.decide(answer == QMessageBox.Yes)
 
     def mark_done(self, profile: str) -> None:
         for row in range(self.web_profiles.rowCount()):
-            if self.web_profiles.item(row, 1) and self.web_profiles.item(row, 1).text() == profile:
+            item = self.web_profiles.item(row, 1)
+            if item and item.text() == profile:
                 self.web_profiles.item(row, 2).setText("Yayınlandı")
 
     def cancel_current(self) -> None:
         if self.publish_worker:
-            self.publish_worker.cancel()
-            self.web_status.setText("İptal ediliyor")
+            self.publish_worker.cancel(); self.web_status.setText("İptal ediliyor")
 
     def publish_failed(self, detail: str) -> None:
-        QMessageBox.critical(self, "Azure + Web yayın hatası", detail)
         self.web_status.setText("Başarısız")
-        self.cleanup_worker()
+        QMessageBox.critical(self, "Azure + Web yayın hatası", detail)
 
     def publish_finished(self, count: int) -> None:
         self.web_status.setText(f"Tamamlandı: {count} profil")
         if count:
             QMessageBox.information(self, "Yayın tamamlandı", f"{count} profil başarıyla işlendi.")
-        self.cleanup_worker()
 
     def cleanup_worker(self) -> None:
         worker = self.publish_worker
@@ -340,8 +309,7 @@ def main() -> int:
     app.setOrganizationName("SignalDesk")
     app.setStyle("Fusion")
     QLocale.setDefault(QLocale(QLocale.Turkish, QLocale.Turkey))
-    window = TurkceAnaPencere()
-    window.show()
+    window = TurkceAnaPencere(); window.show()
     return app.exec()
 
 
