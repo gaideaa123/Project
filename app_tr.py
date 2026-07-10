@@ -21,6 +21,7 @@ import app as core
 import tiktok_login
 import video_variants
 import web_uploader
+from uniquizer_tab import UniquizerTab
 
 AZURE_SERVICE = "signaldesk-azure-gpt4o"
 GUIDE = """Konu: Başlık üretmeyi kolaylaştıran faydalı bir internet sitesi.
@@ -96,6 +97,7 @@ class PublishWorker(QThread):
             variants = video_variants.create_variants(
                 self.source, self.variant_count,
                 lambda percent, text: (self.progress.emit(percent), self.status.emit(text)),
+                cold_open=True,
             )
             self.variants_ready.emit([str(path) for path in variants])
             client = AzureTitleClient(self.key, self.url, self.guide)
@@ -119,10 +121,16 @@ class PublishWorker(QThread):
 
 class TurkceAnaPencere(core.MainWindow):
     def __init__(self):
-        self.publish_worker = None; super().__init__(); self.setWindowTitle("SignalDesk: Azure + Web Yayıncı")
+        self.publish_worker = None
+        self.uniquizer_tab: UniquizerTab | None = None
+        super().__init__()
+        self.setWindowTitle("SignalDesk: Azure + Web Yayıncı")
 
     def build_ui(self):
-        super().build_ui(); self.tabs.insertTab(1, self.azure_web_tab(), "Azure + Web Yükleyici")
+        super().build_ui()
+        self.uniquizer_tab = UniquizerTab(self)
+        self.tabs.insertTab(1, self.uniquizer_tab, "Varyasyonlara Ayır")
+        self.tabs.insertTab(2, self.azure_web_tab(), "Azure + Web Yükleyici")
 
     def azure_web_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
@@ -181,7 +189,7 @@ class TurkceAnaPencere(core.MainWindow):
             try: tiktok_login.save_session(name, session.text())
             except Exception:
                 self.registry.delete_account(account["id"]); raise
-            self.refresh(); self.tabs.setCurrentIndex(1)
+            self.refresh(); self.tabs.setCurrentWidget(self.uniquizer_tab)
             QMessageBox.information(self, "Hesap eklendi", f"{name} Session ID ile eklendi.")
         except Exception as exc: QMessageBox.critical(self, "Hesap eklenemedi", str(exc))
 
@@ -260,6 +268,9 @@ class TurkceAnaPencere(core.MainWindow):
         worker = self.publish_worker; self.publish_worker = None; self.cancel_publish.setEnabled(False)
         if worker: worker.deleteLater()
     def closeEvent(self, event):
+        if self.uniquizer_tab and not self.uniquizer_tab.shutdown(5000):
+            QMessageBox.warning(self, "Uniquizer çalışıyor", "Video üretimi bitmeden pencere kapatılamaz.")
+            event.ignore(); return
         if self.publish_worker and self.publish_worker.isRunning():
             self.publish_worker.cancel()
             if not self.publish_worker.wait(5000): event.ignore(); return
