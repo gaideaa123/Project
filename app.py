@@ -1,101 +1,197 @@
 from __future__ import annotations
 
-import copy
+"""SignalDesk Studio: hardened single-file TikTok publisher.
+
+Runtime dependencies:
+    pip install PySide6 requests keyring platformdirs
+
+The application uses TikTok's documented Login Kit and Content Posting API.
+Public posting remains subject to TikTok app review and user consent.
+"""
+
+import contextlib
+import hashlib
 import json
 import logging
-import math
+from logging.handlers import RotatingFileHandler
 import os
+from pathlib import Path
+import secrets
 import shutil
+import string
+import subprocess
 import sys
 import tempfile
 import threading
-import traceback
+import time
+import urllib.parse
 import uuid
+import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-import ffmpeg
 import keyring
 import requests
 from platformdirs import user_data_dir
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from PySide6.QtCore import QObject, QDateTime, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
+    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QFileDialog,
+    QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
-APP_NAME = "SignalDesk Publisher"
-APP_SLUG = "signaldesk-publisher"
-KEYRING_SERVICE = "signaldesk-publisher.tokens"
-TIKTOK_API = "https://open.tiktokapis.com"
-POST_WINDOW = timedelta(hours=23)
+APP_NAME = "SignalDesk Studio"
+APP_SLUG = "signaldesk-studio"
 UTC = timezone.utc
+POST_WINDOW = timedelta(hours=23)
+TIKTOK_API = "https://open.tiktokapis.com"
+TIKTOK_AUTH = "https://www.tiktok.com/v2/auth/authorize/"
+KEYRING_SERVICE = "signaldesk-studio"
+STATE_VERSION = 3
 
 
-def now_utc() -> datetime:
+def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def to_iso(value: datetime) -> str:
+def iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
 
-def from_iso(value: str) -> datetime:
+def parse_iso(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def setup_logger(folder: Path) -> logging.Logger:
-    folder.mkdir(parents=True, exist_ok=True)
+def app_data_dir() -> Path:
+    path = Path(user_data_dir(APP_SLUG, "SignalDesk"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def build_logger(folder: Path) -> logging.Logger:
     logger = logging.getLogger(APP_SLUG)
     logger.setLevel(logging.INFO)
+    logger.propagate = False
     if not logger.handlers:
-        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-        file_handler = logging.FileHandler(folder / "signaldesk.log", encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+        handler = RotatingFileHandler(
+            folder / "studio_production.log", maxBytes=5_000_000,
+            backupCount=5, encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(threadName)s | %(message)s"
+        ))
+        logger.addHandler(handler)
     return logger
 
 
-class RegistryError(RuntimeError):
+DATA_DIR = app_data_dir()
+LOGGER = build_logger(DATA_DIR)
+
+
+class StudioError(RuntimeError):
     pass
 
 
-class PipelineRegistry:
-    """Atomic, thread-safe state with deterministic 23-hour scheduling guards."""
+class StateError(StudioError):
+    pass
+
+
+class ApiError(StudioError):
+    pass
+
+
+class Cancelled(StudioError):
+    pass
+
+
+class ProcessFileLock:
+    """Small cross-process lock based on atomic O_EXCL creation."""
+
+    def __init__(self, path: Path, timeout: float = 10.0, stale_after: float = 900.0):
+        self.path = path
+        self.timeout = timeout
+        self.stale_after = stale_after
+        self.fd: int | None = None
+
+    def acquire(self) -> bool:
+        deadline = time.monotonic() + self.timeout
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        while time.monotonic() < deadline:
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                payload = json.dumps({"pid": os.getpid(), "created": time.time()}).encode()
+                os.write(self.fd, payload)
+                os.fsync(self.fd)
+                return True
+            except FileExistsError:
+                with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):
+                    age = time.time() - self.path.stat().st_mtime
+                    if age > self.stale_after:
+                        self.path.unlink()
+                        continue
+                time.sleep(0.1)
+        return False
+
+    def release(self) -> None:
+        if self.fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
+            self.fd = None
+        with contextlib.suppress(OSError):
+            self.path.unlink()
+
+    def __enter__(self) -> "ProcessFileLock":
+        if not self.acquire():
+            raise StateError(f"Lock timeout: {self.path.name}")
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+
+class AtomicRegistry:
+    """Thread-safe and process-safe JSON registry with atomic replacement."""
 
     def __init__(self, path: Path):
         self.path = path
-        self.backup = path.with_suffix(path.suffix + ".bak")
-        self.lock = threading.RLock()
+        self.backup = path.with_suffix(".json.bak")
+        self.lock_path = path.with_suffix(".json.lock")
+        self.thread_lock = threading.RLock()
+        if not path.exists():
+            self._atomic_write(self._empty())
+
+    @staticmethod
+    def _empty() -> dict[str, Any]:
+        return {"version": STATE_VERSION, "accounts": [], "jobs": []}
+
+    def _read_unlocked(self) -> dict[str, Any]:
+        sources = (self.path, self.backup)
+        last_error: Exception | None = None
+        for source in sources:
+            if not source.exists():
+                continue
+            try:
+                data = json.loads(source.read_text(encoding="utf-8"))
+                if not isinstance(data.get("accounts"), list) or not isinstance(data.get("jobs"), list):
+                    raise ValueError("invalid state schema")
+                data["version"] = STATE_VERSION
+                return data
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+                LOGGER.exception("State read failed for %s", source.name)
+        raise StateError(f"State is unreadable: {last_error}")
+
+    def _atomic_write(self, data: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._write({"version": 2, "accounts": [], "jobs": []})
-
-    def _read(self) -> dict[str, Any]:
-        try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception as exc:
-            if self.backup.exists():
-                with self.backup.open("r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-            else:
-                raise RegistryError(f"Cannot read registry: {exc}") from exc
-        if not isinstance(data.get("accounts"), list) or not isinstance(data.get("jobs"), list):
-            raise RegistryError("Registry schema is invalid")
-        return data
-
-    def _write(self, data: dict[str, Any]) -> None:
-        fd, temp_name = tempfile.mkstemp(prefix="pipeline-", suffix=".json", dir=self.path.parent)
+        fd, temporary = tempfile.mkstemp(prefix="automation-", suffix=".tmp", dir=self.path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -103,645 +199,759 @@ class PipelineRegistry:
                 os.fsync(handle.fileno())
             if self.path.exists():
                 shutil.copy2(self.path, self.backup)
-            os.replace(temp_name, self.path)
+            os.replace(temporary, self.path)
         finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
 
     def snapshot(self) -> dict[str, Any]:
-        with self.lock:
-            return copy.deepcopy(self._read())
+        with self.thread_lock, ProcessFileLock(self.lock_path):
+            return json.loads(json.dumps(self._read_unlocked()))
 
     def mutate(self, operation: Callable[[dict[str, Any]], Any]) -> Any:
-        with self.lock:
-            state = self._read()
+        with self.thread_lock, ProcessFileLock(self.lock_path):
+            state = self._read_unlocked()
             result = operation(state)
-            self._write(state)
+            self._atomic_write(state)
             return result
 
-    def add_account(self, profile_name: str, platform: str) -> dict[str, Any]:
+    def add_account(self, name: str) -> dict[str, Any]:
+        clean = name.strip()
+        if not clean:
+            raise StateError("Profile name is required")
         account = {
-            "id": uuid.uuid4().hex,
-            "profile_name": profile_name.strip(),
-            "platform": platform,
-            "token_expires_at": to_iso(now_utc() + timedelta(minutes=55)),
-            "last_post_at": "",
-            "created_at": to_iso(now_utc()),
+            "id": uuid.uuid4().hex, "name": clean, "platform": "TikTok",
+            "created_at": iso(utc_now()), "token_expires_at": "",
+            "last_post_at": "", "last_status": "Connected",
         }
-
         def operation(state: dict[str, Any]) -> dict[str, Any]:
-            if any(a["profile_name"].casefold() == account["profile_name"].casefold() for a in state["accounts"]):
-                raise RegistryError("Profile names must be unique")
+            if any(a["name"].casefold() == clean.casefold() for a in state["accounts"]):
+                raise StateError("Profile names must be unique")
             state["accounts"].append(account)
             return account
-
         return self.mutate(operation)
-
-    def delete_account(self, account_id: str) -> None:
-        def operation(state: dict[str, Any]) -> None:
-            state["accounts"] = [a for a in state["accounts"] if a["id"] != account_id]
-            state["jobs"] = [j for j in state["jobs"] if j["account_id"] != account_id]
-        self.mutate(operation)
 
     def update_account(self, account_id: str, **changes: Any) -> None:
         def operation(state: dict[str, Any]) -> None:
             account = next((a for a in state["accounts"] if a["id"] == account_id), None)
             if not account:
-                raise RegistryError("Account no longer exists")
+                raise StateError("Profile no longer exists")
             account.update(changes)
         self.mutate(operation)
 
+    def delete_account(self, account_id: str) -> None:
+        def operation(state: dict[str, Any]) -> None:
+            if any(j["account_id"] == account_id and j["status"] == "running" for j in state["jobs"]):
+                raise StateError("A running profile cannot be removed")
+            state["accounts"] = [a for a in state["accounts"] if a["id"] != account_id]
+            state["jobs"] = [j for j in state["jobs"] if j["account_id"] != account_id]
+        self.mutate(operation)
+
     @staticmethod
-    def _assert_window(state: dict[str, Any], account_id: str, planned_at: datetime) -> None:
+    def _assert_window(state: dict[str, Any], account_id: str, planned: datetime) -> None:
         account = next((a for a in state["accounts"] if a["id"] == account_id), None)
         if not account:
-            raise RegistryError("Choose a valid profile")
-        last_post = account.get("last_post_at", "")
-        if last_post and abs(planned_at - from_iso(last_post)) < POST_WINDOW:
-            raise RegistryError("This profile has posted within the protected 23-hour window")
+            raise StateError("Select a valid profile")
+        if account.get("last_post_at"):
+            if abs(planned - parse_iso(account["last_post_at"])) < POST_WINDOW:
+                raise StateError("This profile is inside its protected 23-hour window")
         for job in state["jobs"]:
-            if job["account_id"] != account_id or job["status"] not in {"queued", "running"}:
+            if job["account_id"] != account_id or job["status"] not in {"queued", "running", "processing"}:
                 continue
-            if abs(planned_at - from_iso(job["run_at"])) < POST_WINDOW:
-                raise RegistryError("This profile already has a queued post within 23 hours")
+            if abs(planned - parse_iso(job["run_at"])) < POST_WINDOW:
+                raise StateError("Another active post exists within 23 hours")
 
-    def add_job(self, account_id: str, video: str, caption: str, run_at: datetime, daily: bool) -> dict[str, Any]:
+    def add_job(self, account_id: str, video: str, caption: str,
+                run_at: datetime, privacy: str) -> dict[str, Any]:
+        path = Path(video).expanduser().resolve()
+        if not path.is_file():
+            raise StateError("Choose an existing video")
+        if path.suffix.lower() not in {".mp4", ".mov", ".m4v", ".webm"}:
+            raise StateError("Unsupported video container")
         job = {
-            "id": uuid.uuid4().hex,
-            "account_id": account_id,
-            "video_path": str(Path(video).resolve()),
-            "caption": caption.strip(),
-            "run_at": to_iso(run_at),
-            "repeat_daily": daily,
-            "status": "queued",
-            "publish_id": "",
-            "last_error": "",
-            "created_at": to_iso(now_utc()),
+            "id": uuid.uuid4().hex, "account_id": account_id,
+            "video_path": str(path), "caption": caption.strip()[:2200],
+            "run_at": iso(run_at), "privacy": privacy, "status": "queued",
+            "progress": 0, "publish_id": "", "server_status": "",
+            "last_error": "", "attempts": 0, "created_at": iso(utc_now()),
         }
-
         def operation(state: dict[str, Any]) -> dict[str, Any]:
             self._assert_window(state, account_id, run_at.astimezone(UTC))
             state["jobs"].append(job)
             return job
-
         return self.mutate(operation)
 
-    def claim_due_job(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Atomically re-check rate limits and mark one job running."""
+    def claim_job(self, job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        now = utc_now()
         def operation(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
             job = next((j for j in state["jobs"] if j["id"] == job_id), None)
-            if not job or job["status"] != "queued" or from_iso(job["run_at"]) > now_utc():
-                raise RegistryError("Job is no longer due")
+            if not job or job["status"] != "queued" or parse_iso(job["run_at"]) > now:
+                raise StateError("Job is not claimable")
             account = next((a for a in state["accounts"] if a["id"] == job["account_id"]), None)
             if not account:
-                raise RegistryError("The profile was removed")
-            last_post = account.get("last_post_at", "")
-            if last_post and now_utc() - from_iso(last_post) < POST_WINDOW:
-                raise RegistryError("23-hour publishing guard blocked this upload")
-            job["status"] = "running"
-            job["last_error"] = ""
-            return copy.deepcopy(job), copy.deepcopy(account)
+                raise StateError("Profile was removed")
+            if any(j["account_id"] == account["id"] and j["status"] in {"running", "processing"}
+                   and j["id"] != job_id for j in state["jobs"]):
+                raise StateError("Profile already has a running upload")
+            if account.get("last_post_at") and now - parse_iso(account["last_post_at"]) < POST_WINDOW:
+                raise StateError("23-hour guard blocked this upload")
+            job.update(status="running", progress=1, last_error="", attempts=job.get("attempts", 0) + 1)
+            return json.loads(json.dumps(job)), json.loads(json.dumps(account))
         return self.mutate(operation)
 
-    def complete_job(self, job_id: str, publish_id: str) -> None:
-        submitted = now_utc()
-
-        def operation(state: dict[str, Any]) -> None:
-            job = next(j for j in state["jobs"] if j["id"] == job_id)
-            account = next(a for a in state["accounts"] if a["id"] == job["account_id"])
-            account["last_post_at"] = to_iso(submitted)
-            job["publish_id"] = publish_id
-            job["last_error"] = ""
-            if job["repeat_daily"]:
-                next_run = from_iso(job["run_at"]) + timedelta(days=1)
-                while next_run - submitted < POST_WINDOW:
-                    next_run += timedelta(days=1)
-                job["run_at"] = to_iso(next_run)
-                job["status"] = "queued"
-            else:
-                job["status"] = "submitted"
-        self.mutate(operation)
-
-    def fail_job(self, job_id: str, error: str) -> None:
+    def update_job(self, job_id: str, **changes: Any) -> None:
         def operation(state: dict[str, Any]) -> None:
             job = next((j for j in state["jobs"] if j["id"] == job_id), None)
             if job:
-                job.update(status="failed", last_error=error[:1000])
+                job.update(changes)
         self.mutate(operation)
 
-    def delete_job(self, job_id: str) -> None:
-        self.mutate(lambda state: state.update(jobs=[j for j in state["jobs"] if j["id"] != job_id]))
+    def complete_job(self, job_id: str, publish_id: str, server_status: str) -> None:
+        submitted = utc_now()
+        def operation(state: dict[str, Any]) -> None:
+            job = next(j for j in state["jobs"] if j["id"] == job_id)
+            account = next(a for a in state["accounts"] if a["id"] == job["account_id"])
+            job.update(status="published", progress=100, publish_id=publish_id,
+                       server_status=server_status, last_error="")
+            account.update(last_post_at=iso(submitted), last_status=server_status)
+        self.mutate(operation)
+
+    def fail_job(self, job_id: str, message: str) -> None:
+        self.update_job(job_id, status="failed", last_error=message[:1200])
+
+    def recover_interrupted(self) -> None:
+        def operation(state: dict[str, Any]) -> None:
+            for job in state["jobs"]:
+                if job["status"] in {"running", "processing"}:
+                    job.update(status="queued", last_error="Recovered after interrupted shutdown")
+        self.mutate(operation)
 
 
-class SecretStore:
-    def set(self, account_id: str, access: str, refresh: str) -> None:
-        keyring.set_password(KEYRING_SERVICE, f"{account_id}:access", access)
-        keyring.set_password(KEYRING_SERVICE, f"{account_id}:refresh", refresh)
+class SecureVault:
+    """OS-keychain storage. Values are never logged or persisted in JSON."""
 
-    def get(self, account_id: str) -> tuple[str, str]:
-        return (
-            keyring.get_password(KEYRING_SERVICE, f"{account_id}:access") or "",
-            keyring.get_password(KEYRING_SERVICE, f"{account_id}:refresh") or "",
+    def _set(self, key: str, value: str) -> None:
+        try:
+            keyring.set_password(KEYRING_SERVICE, key, value)
+        except Exception as exc:
+            LOGGER.exception("Keychain write failed")
+            raise StudioError("The operating-system keychain rejected the credential") from exc
+
+    def _get(self, key: str) -> str:
+        try:
+            return keyring.get_password(KEYRING_SERVICE, key) or ""
+        except Exception as exc:
+            LOGGER.exception("Keychain read failed")
+            raise StudioError("The operating-system keychain is unavailable") from exc
+
+    def set_app(self, client_key: str, client_secret: str, redirect_uri: str) -> None:
+        self._set("app:client_key", client_key)
+        self._set("app:client_secret", client_secret)
+        self._set("app:redirect_uri", redirect_uri)
+
+    def app(self) -> tuple[str, str, str]:
+        return self._get("app:client_key"), self._get("app:client_secret"), self._get("app:redirect_uri")
+
+    def set_tokens(self, account_id: str, access: str, refresh: str) -> None:
+        self._set(f"{account_id}:access", access)
+        self._set(f"{account_id}:refresh", refresh)
+
+    def tokens(self, account_id: str) -> tuple[str, str]:
+        return self._get(f"{account_id}:access"), self._get(f"{account_id}:refresh")
+
+    def delete_account(self, account_id: str) -> None:
+        for suffix in ("access", "refresh"):
+            with contextlib.suppress(Exception):
+                keyring.delete_password(KEYRING_SERVICE, f"{account_id}:{suffix}")
+
+
+class ResilientHttp:
+    def __init__(self):
+        retry = Retry(
+            total=5, connect=5, read=5, status=5, backoff_factor=0.8,
+            status_forcelist=(408, 425, 429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "POST", "PUT"}),
+            respect_retry_after_header=True, raise_on_status=False,
         )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": f"{APP_NAME}/3.0"})
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        self.direct = requests.Session()
+        self.direct.trust_env = False
+        self.direct.mount("https://", adapter)
+        self.direct.mount("http://", adapter)
 
-    def delete(self, account_id: str) -> None:
-        for kind in ("access", "refresh"):
-            try:
-                keyring.delete_password(KEYRING_SERVICE, f"{account_id}:{kind}")
-            except keyring.errors.PasswordDeleteError:
-                pass
-
-
-class ThreadSignals(QObject):
-    progress = Signal(int)
-    log = Signal(str)
-    result = Signal(object)
-    error = Signal(str)
-    finished = Signal()
-
-
-class BackgroundTask:
-    """Runs blocking work in a real Python background thread, reporting via Qt signals."""
-
-    def __init__(self, function: Callable[[ThreadSignals], Any]):
-        self.function = function
-        self.signals = ThreadSignals()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def _run(self) -> None:
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        kwargs.setdefault("timeout", (15, 120))
         try:
-            self.signals.result.emit(self.function(self.signals))
-        except Exception:
-            self.signals.error.emit(traceback.format_exc())
-        finally:
-            self.signals.finished.emit()
+            return self.session.request(method, url, **kwargs)
+        except requests.exceptions.ProxyError:
+            LOGGER.warning("Configured proxy failed; retrying direct connection")
+            return self.direct.request(method, url, **kwargs)
+        except requests.RequestException as exc:
+            raise ApiError(f"Network request failed: {type(exc).__name__}") from exc
 
 
-class RenditionEngine:
-    RESOLUTIONS = ((1080, 1920), (720, 1280), (1080, 1080), (1920, 1080))
+class TikTokClient:
+    TERMINAL_SUCCESS = {"PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"}
+    TERMINAL_FAILURE = {"FAILED", "PUBLISH_FAILED", "DOWNLOAD_FAILED"}
 
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
-
-    @staticmethod
-    def validate() -> None:
-        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-            raise RuntimeError("FFmpeg and FFprobe must be installed and available on PATH")
-
-    def render(self, master: Path, output: Path, count: int, signals: ThreadSignals) -> list[str]:
-        self.validate()
-        if not master.is_file():
-            raise FileNotFoundError(master)
-        output.mkdir(parents=True, exist_ok=True)
-        probe = ffmpeg.probe(str(master))
-        has_audio = any(s.get("codec_type") == "audio" for s in probe.get("streams", []))
-        completed: list[str] = []
-
-        for index in range(count):
-            width, height = self.RESOLUTIONS[index % len(self.RESOLUTIONS)]
-            crf = 20 + (index % 4)
-            sample_rate = (44100, 48000)[index % 2]
-            sharpen = (0.25, 0.35, 0.45)[index % 3]
-            grain = (0, 1, 2)[index % 3]
-            target = output / f"{master.stem}-{index + 1:03d}-{width}x{height}-crf{crf}-{sample_rate}hz.mp4"
-            signals.log.emit(f"Encoding {target.name}")
-
-            source = ffmpeg.input(str(master))
-            video = (source.video
-                     .filter("scale", width, height, force_original_aspect_ratio="decrease")
-                     .filter("pad", width, height, "(ow-iw)/2", "(oh-ih)/2")
-                     .filter("fps", fps=30)
-                     .filter("unsharp", 5, 5, sharpen, 5, 5, 0.0))
-            if grain:
-                video = video.filter("noise", alls=grain, allf="t")
-
-            options = {
-                "vcodec": "libx264", "preset": "medium", "crf": crf,
-                "profile:v": "high", "level:v": "4.1", "pix_fmt": "yuv420p",
-                "movflags": "+faststart", "map_metadata": -1,
-                "metadata": "comment=SignalDesk standards-based delivery rendition",
-            }
-            if has_audio:
-                audio = (source.audio
-                         .filter("aresample", sample_rate)
-                         .filter("loudnorm", I=-16, TP=-1.5, LRA=11))
-                pipeline = ffmpeg.output(video, audio, str(target), acodec="aac", audio_bitrate="192k", ar=sample_rate, **options)
-            else:
-                pipeline = ffmpeg.output(video, str(target), **options)
-            try:
-                pipeline.global_args("-hide_banner", "-loglevel", "error").overwrite_output().run(
-                    capture_stdout=True, capture_stderr=True
-                )
-            except ffmpeg.Error as exc:
-                detail = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
-                raise RuntimeError(f"FFmpeg failed for {target.name}: {detail}") from exc
-            completed.append(str(target))
-            signals.progress.emit(round((index + 1) * 100 / count))
-        return completed
-
-
-class TikTokPublisher:
-    def __init__(self, registry: PipelineRegistry, secrets: SecretStore):
+    def __init__(self, registry: AtomicRegistry, vault: SecureVault):
         self.registry = registry
-        self.secrets = secrets
+        self.vault = vault
+        self.http = ResilientHttp()
 
     @staticmethod
-    def _json(response: requests.Response) -> dict[str, Any]:
+    def payload(response: requests.Response) -> dict[str, Any]:
         try:
-            payload = response.json()
-        except ValueError:
-            payload = {"raw": response.text[:1000]}
+            data = response.json()
+        except ValueError as exc:
+            raise ApiError(f"TikTok returned non-JSON HTTP {response.status_code}") from exc
         if not response.ok:
-            raise RuntimeError(f"TikTok API {response.status_code}: {payload}")
-        error = payload.get("error", {})
-        if error.get("code") not in (None, 0, "ok"):
-            raise RuntimeError(f"TikTok API error: {error}")
-        return payload
+            error = data.get("error", {})
+            raise ApiError(f"TikTok HTTP {response.status_code}: {error.get('message') or error.get('code') or 'request failed'}")
+        error = data.get("error") or {}
+        if error.get("code") not in (None, "", "ok", 0):
+            raise ApiError(f"TikTok API: {error.get('message') or error.get('code')}")
+        return data
 
-    def token(self, account: dict[str, Any]) -> str:
-        access, refresh = self.secrets.get(account["id"])
+    def access_token(self, account: dict[str, Any]) -> str:
+        access, refresh = self.vault.tokens(account["id"])
         if not access:
-            raise RuntimeError("No access token is stored for this profile")
-        if from_iso(account["token_expires_at"]) > now_utc() + timedelta(minutes=5):
+            raise ApiError("This profile has no OAuth access token")
+        expiry = account.get("token_expires_at")
+        if expiry and parse_iso(expiry) > utc_now() + timedelta(minutes=5):
             return access
-        client_key = os.getenv("TIKTOK_CLIENT_KEY", "").strip()
-        client_secret = os.getenv("TIKTOK_CLIENT_SECRET", "").strip()
-        if not client_key or not client_secret or not refresh:
-            raise RuntimeError("Token refresh requires TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, and a refresh token")
-        response = requests.post(
-            f"{TIKTOK_API}/v2/oauth/token/",
+        client_key, client_secret, _ = self.vault.app()
+        if not all((client_key, client_secret, refresh)):
+            raise ApiError("Token refresh credentials are incomplete")
+        response = self.http.request(
+            "POST", f"{TIKTOK_API}/v2/oauth/token/",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={"client_key": client_key, "client_secret": client_secret,
                   "grant_type": "refresh_token", "refresh_token": refresh},
-            headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=45,
+            timeout=(15, 45),
         )
-        payload = self._json(response)
-        access = payload["access_token"]
-        self.secrets.set(account["id"], access, payload.get("refresh_token", refresh))
+        data = self.payload(response)
+        access = data["access_token"]
+        self.vault.set_tokens(account["id"], access, data.get("refresh_token", refresh))
         self.registry.update_account(
-            account["id"],
-            token_expires_at=to_iso(now_utc() + timedelta(seconds=int(payload.get("expires_in", 3600)))),
+            account["id"], token_expires_at=iso(utc_now() + timedelta(seconds=int(data.get("expires_in", 86400))))
         )
         return access
 
     @staticmethod
     def chunk_plan(size: int) -> tuple[int, int]:
         if size <= 0:
-            raise ValueError("Video is empty")
-        if size <= 64 * 1024 * 1024:
+            raise ApiError("Video is empty")
+        mib = 1024 * 1024
+        if size <= 64 * mib:
             return size, 1
-        chunk = 10 * 1024 * 1024
-        count = max(1, size // chunk)
-        if size - (count - 1) * chunk > 128 * 1024 * 1024:
-            chunk = 64 * 1024 * 1024
-            count = max(1, size // chunk)
+        chunk = 10 * mib
+        count = (size + chunk - 1) // chunk
+        if count > 1000:
+            chunk = 64 * mib
+            count = (size + chunk - 1) // chunk
+        if count > 1000:
+            raise ApiError("Video exceeds the supported chunk count")
         return chunk, count
 
-    def publish(self, account: dict[str, Any], job: dict[str, Any], signals: ThreadSignals) -> str:
+    def creator_info(self, token: str) -> dict[str, Any]:
+        response = self.http.request(
+            "POST", f"{TIKTOK_API}/v2/post/publish/creator_info/query/",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json={}, timeout=(15, 45),
+        )
+        return self.payload(response).get("data", {})
+
+    def upload(self, account: dict[str, Any], job: dict[str, Any],
+               progress: Callable[[int, str], None], cancelled: Callable[[], bool]) -> str:
         video = Path(job["video_path"])
-        if not video.is_file():
-            raise FileNotFoundError(video)
-        token = self.token(account)
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"}
-        info = self._json(requests.post(
-            f"{TIKTOK_API}/v2/post/publish/creator_info/query/", headers=headers, json={}, timeout=45
-        )).get("data", {})
-        choices = info.get("privacy_level_options", [])
-        privacy = "SELF_ONLY" if "SELF_ONLY" in choices or not choices else choices[0]
+        validate_media(video)
+        token = self.access_token(account)
+        creator = self.creator_info(token)
+        allowed = creator.get("privacy_level_options") or ["SELF_ONLY"]
+        privacy = job.get("privacy", "SELF_ONLY")
+        if privacy not in allowed:
+            privacy = "SELF_ONLY" if "SELF_ONLY" in allowed else allowed[0]
         size = video.stat().st_size
         chunk_size, chunk_count = self.chunk_plan(size)
-        signals.log.emit(f"Initializing official upload for {account['profile_name']}")
-        initialized = self._json(requests.post(
-            f"{TIKTOK_API}/v2/post/publish/video/init/", headers=headers,
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"}
+        init = self.http.request(
+            "POST", f"{TIKTOK_API}/v2/post/publish/video/init/", headers=headers,
             json={
-                "post_info": {
-                    "title": job["caption"][:2200], "privacy_level": privacy,
-                    "disable_duet": False, "disable_comment": False,
-                    "disable_stitch": False, "video_cover_timestamp_ms": 1000,
-                },
-                "source_info": {
-                    "source": "FILE_UPLOAD", "video_size": size,
-                    "chunk_size": chunk_size, "total_chunk_count": chunk_count,
-                },
-            }, timeout=45,
-        )).get("data", {})
+                "post_info": {"title": job["caption"], "privacy_level": privacy,
+                              "disable_duet": False, "disable_comment": False,
+                              "disable_stitch": False, "video_cover_timestamp_ms": 1000},
+                "source_info": {"source": "FILE_UPLOAD", "video_size": size,
+                                "chunk_size": chunk_size, "total_chunk_count": chunk_count},
+            }, timeout=(15, 60),
+        )
+        initialized = self.payload(init).get("data", {})
         upload_url, publish_id = initialized.get("upload_url"), initialized.get("publish_id")
         if not upload_url or not publish_id:
-            raise RuntimeError("TikTok did not return an upload URL and publish ID")
-
+            raise ApiError("TikTok did not return an upload URL and publish ID")
         sent = 0
         with video.open("rb") as handle:
             for index in range(chunk_count):
-                amount = size - sent if index == chunk_count - 1 else min(chunk_size, size - sent)
+                if cancelled():
+                    raise Cancelled("Upload cancelled")
+                amount = min(chunk_size, size - sent)
                 body = handle.read(amount)
-                end = sent + len(body) - 1
-                response = requests.put(
-                    upload_url, data=body,
-                    headers={"Content-Type": "video/mp4", "Content-Length": str(len(body)),
-                             "Content-Range": f"bytes {sent}-{end}/{size}"}, timeout=180,
+                if len(body) != amount:
+                    raise ApiError("Video changed or became unreadable during upload")
+                end = sent + amount - 1
+                response = self.http.request(
+                    "PUT", upload_url, data=body,
+                    headers={"Content-Type": "video/mp4", "Content-Length": str(amount),
+                             "Content-Range": f"bytes {sent}-{end}/{size}"},
+                    timeout=(30, 240),
                 )
                 if not response.ok:
-                    raise RuntimeError(f"Chunk upload failed ({response.status_code}): {response.text[:500]}")
+                    raise ApiError(f"Chunk {index + 1} failed with HTTP {response.status_code}")
                 sent = end + 1
-                signals.progress.emit(round(sent * 100 / size))
-                signals.log.emit(f"Uploaded chunk {index + 1}/{chunk_count}")
+                progress(5 + round(70 * sent / size), f"Uploaded chunk {index + 1}/{chunk_count}")
         return publish_id
+
+    def poll(self, account: dict[str, Any], publish_id: str,
+             progress: Callable[[int, str], None], cancelled: Callable[[], bool],
+             timeout_seconds: int = 900) -> str:
+        token = self.access_token(account)
+        deadline = time.monotonic() + timeout_seconds
+        interval = 2.0
+        while time.monotonic() < deadline:
+            if cancelled():
+                raise Cancelled("Status polling cancelled")
+            response = self.http.request(
+                "POST", f"{TIKTOK_API}/v2/post/publish/status/fetch/",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"publish_id": publish_id}, timeout=(15, 45),
+            )
+            data = self.payload(response).get("data", {})
+            status = str(data.get("status", "PROCESSING_UPLOAD"))
+            uploaded = int(data.get("uploaded_bytes", 0) or 0)
+            progress(min(99, 78 + int((time.monotonic() % 20))), status.replace("_", " ").title())
+            if status in self.TERMINAL_SUCCESS:
+                return status
+            if status in self.TERMINAL_FAILURE:
+                reasons = data.get("fail_reason") or data.get("publicaly_available_post_id") or "TikTok processing failed"
+                raise ApiError(str(reasons))
+            LOGGER.info("Publish status %s, uploaded_bytes=%s", status, uploaded)
+            time.sleep(interval)
+            interval = min(15.0, interval * 1.35)
+        raise ApiError("Publishing status timed out after 15 minutes")
+
+
+def validate_media(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise StudioError("Video is missing or empty")
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        LOGGER.warning("FFprobe is unavailable; deep media validation skipped")
+        return
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height,duration",
+             "-of", "json", str(path)], capture_output=True, text=True,
+            timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StudioError("FFprobe could not inspect the video") from exc
+    if completed.returncode != 0:
+        LOGGER.error("FFprobe rejected media: %s", completed.stderr[:1000])
+        raise StudioError("Video contains unreadable or corrupted frames")
+    try:
+        streams = json.loads(completed.stdout).get("streams", [])
+    except json.JSONDecodeError as exc:
+        raise StudioError("FFprobe returned invalid media metadata") from exc
+    if not streams or not streams[0].get("codec_name"):
+        raise StudioError("No valid video stream was found")
+
+
+@dataclass
+class OAuthResult:
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+class OAuthFlow:
+    def __init__(self, vault: SecureVault):
+        self.vault = vault
+        self.http = ResilientHttp()
+
+    def authorize(self, cancelled: Callable[[], bool]) -> OAuthResult:
+        client_key, client_secret, redirect_uri = self.vault.app()
+        if not all((client_key, client_secret, redirect_uri)):
+            raise StudioError("Save Client Key, Client Secret, and Redirect URI first")
+        parsed = urllib.parse.urlparse(redirect_uri)
+        if parsed.hostname not in {"127.0.0.1", "localhost"} or not parsed.port:
+            raise StudioError("Redirect URI must use localhost with an explicit port")
+        state = secrets.token_urlsafe(32)
+        alphabet = string.ascii_letters + string.digits + "-._~"
+        verifier = "".join(secrets.choice(alphabet) for _ in range(64))
+        challenge = hashlib.sha256(verifier.encode("ascii")).hexdigest()
+        result: dict[str, str] = {}
+        event = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if query.get("state", [""])[0] != state:
+                    self.send_response(400); self.end_headers(); event.set(); return
+                result["code"] = query.get("code", [""])[0]
+                result["error"] = query.get("error_description", query.get("error", [""]))[0]
+                body = b"<html><body style='font-family:system-ui;background:#111;color:#eee;padding:48px'>Authorization received. You may close this tab.</body></html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body); event.set()
+
+            def log_message(self, *_: object) -> None:
+                return
+
+        server = ThreadingHTTPServer((parsed.hostname, parsed.port), Handler)
+        server.timeout = 0.5
+        params = {"client_key": client_key, "scope": "user.info.basic,video.publish",
+                  "response_type": "code", "redirect_uri": redirect_uri, "state": state,
+                  "code_challenge": challenge, "code_challenge_method": "S256"}
+        webbrowser.open(TIKTOK_AUTH + "?" + urllib.parse.urlencode(params))
+        deadline = time.monotonic() + 300
+        try:
+            while not event.is_set() and time.monotonic() < deadline:
+                if cancelled():
+                    raise Cancelled("Authorization cancelled")
+                server.handle_request()
+        finally:
+            server.server_close()
+        if result.get("error"):
+            raise ApiError(result["error"])
+        code = result.get("code")
+        if not code:
+            raise ApiError("Authorization timed out or returned no code")
+        response = self.http.request(
+            "POST", f"{TIKTOK_API}/v2/oauth/token/",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={"client_key": client_key, "client_secret": client_secret,
+                  "code": code, "grant_type": "authorization_code",
+                  "redirect_uri": redirect_uri, "code_verifier": verifier}, timeout=(15, 45),
+        )
+        data = TikTokClient.payload(response)
+        return OAuthResult(data["access_token"], data.get("refresh_token", ""), int(data.get("expires_in", 86400)))
+
+
+class UploadThread(QThread):
+    progress_changed = Signal(str, int, str)
+    succeeded = Signal(str, str, str)
+    failed = Signal(str, str)
+
+    def __init__(self, registry: AtomicRegistry, vault: SecureVault,
+                 job: dict[str, Any], account: dict[str, Any]):
+        super().__init__()
+        self.registry, self.vault = registry, vault
+        self.job, self.account = job, account
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        account_lock = DATA_DIR / "locks" / f"account-{self.account['id']}.lock"
+        lease = ProcessFileLock(account_lock, timeout=1.0, stale_after=1800)
+        try:
+            if not lease.acquire():
+                raise StateError("Another process owns this profile upload lock")
+            client = TikTokClient(self.registry, self.vault)
+            def report(value: int, text: str) -> None:
+                self.registry.update_job(self.job["id"], progress=value, server_status=text)
+                self.progress_changed.emit(self.job["id"], value, text)
+            publish_id = client.upload(self.account, self.job, report, self._cancel.is_set)
+            self.registry.update_job(self.job["id"], status="processing", publish_id=publish_id, progress=78)
+            status = client.poll(self.account, publish_id, report, self._cancel.is_set)
+            self.registry.complete_job(self.job["id"], publish_id, status)
+            self.succeeded.emit(self.job["id"], publish_id, status)
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            LOGGER.exception("Upload job failed: %s", self.job["id"])
+            self.registry.fail_job(self.job["id"], message)
+            self.failed.emit(self.job["id"], message)
+        finally:
+            lease.release()
+
+
+class OAuthThread(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, vault: SecureVault):
+        super().__init__(); self.vault = vault; self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(OAuthFlow(self.vault).authorize(self._cancel.is_set))
+        except Exception as exc:
+            LOGGER.exception("OAuth flow failed")
+            self.failed.emit(str(exc) or type(exc).__name__)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.data_dir = Path(user_data_dir(APP_SLUG, "SignalDesk"))
-        self.logger = setup_logger(self.data_dir)
-        self.registry = PipelineRegistry(self.data_dir / "pipeline_registry.json")
-        self.secrets = SecretStore()
-        self.engine = RenditionEngine(self.logger)
-        self.publisher = TikTokPublisher(self.registry, self.secrets)
-        self.tasks: set[BackgroundTask] = set()
-        self.running_jobs: set[str] = set()
-        self.last_outputs: list[str] = []
+        self.registry = AtomicRegistry(DATA_DIR / "automation_state.json")
+        self.vault = SecureVault()
+        self.registry.recover_interrupted()
+        self.workers: dict[str, UploadThread] = {}
+        self.oauth_worker: OAuthThread | None = None
         self.setWindowTitle(APP_NAME)
-        self.resize(1240, 800)
+        self.resize(1260, 820)
         self.setMinimumSize(980, 680)
-        self.build_ui()
-        self.apply_style()
-        self.refresh()
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.run_due)
-        self.timer.start(30_000)
-        QTimer.singleShot(2000, self.run_due)
+        self.build_ui(); self.apply_theme(); self.refresh()
+        self.scheduler = QTimer(self)
+        self.scheduler.timeout.connect(self.run_due)
+        self.scheduler.start(15_000)
+        QTimer.singleShot(1500, self.run_due)
 
     def build_ui(self) -> None:
-        root = QWidget()
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(28, 24, 28, 28)
-        outer.setSpacing(20)
-        header = QHBoxLayout()
-        brand = QVBoxLayout()
-        eyebrow = QLabel("SIGNALDESK / CONTENT OPERATIONS")
-        eyebrow.setObjectName("eyebrow")
-        title = QLabel("Ship clean assets. Keep the queue honest.")
-        title.setObjectName("title")
-        brand.addWidget(eyebrow)
-        brand.addWidget(title)
-        header.addLayout(brand)
-        header.addStretch()
-        self.status = QLabel("READY")
-        self.status.setObjectName("statusPill")
-        header.addWidget(self.status)
-        outer.addLayout(header)
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.addTab(self.accounts_tab(), "Profiles")
-        self.tabs.addTab(self.processing_tab(), "Asset processing")
-        self.tabs.addTab(self.queue_tab(), "Deployment queue")
-        outer.addWidget(self.tabs, 1)
-        self.setCentralWidget(root)
+        root = QWidget(); outer = QVBoxLayout(root)
+        outer.setContentsMargins(28, 24, 28, 28); outer.setSpacing(18)
+        header = QHBoxLayout(); brand = QVBoxLayout(); brand.setSpacing(2)
+        eyebrow = QLabel("SIGNALDESK / CONTROL PLANE"); eyebrow.setObjectName("eyebrow")
+        title = QLabel("Publishing without guesswork."); title.setObjectName("title")
+        brand.addWidget(eyebrow); brand.addWidget(title); header.addLayout(brand); header.addStretch()
+        self.global_status = QLabel("READY"); self.global_status.setObjectName("pill")
+        header.addWidget(self.global_status); outer.addLayout(header)
+        self.tabs = QTabWidget(); self.tabs.setDocumentMode(True)
+        self.tabs.addTab(self.accounts_page(), "Profiles")
+        self.tabs.addTab(self.queue_page(), "Queue")
+        self.tabs.addTab(self.settings_page(), "API settings")
+        outer.addWidget(self.tabs, 1); self.setCentralWidget(root)
 
-    def accounts_tab(self) -> QWidget:
-        page = QWidget()
-        split = QSplitter(Qt.Horizontal)
-        panel = QFrame(); panel.setObjectName("panel")
-        left = QVBoxLayout(panel); left.setContentsMargins(24, 24, 24, 24); left.setSpacing(16)
-        heading = QLabel("Connect an official channel"); heading.setObjectName("sectionTitle")
-        note = QLabel("Credentials are stored in the operating system keychain, never in pipeline_registry.json.")
-        note.setWordWrap(True); note.setObjectName("muted")
-        left.addWidget(heading); left.addWidget(note)
-        form = QFormLayout(); form.setSpacing(12)
-        self.profile_name = QLineEdit(); self.profile_name.setPlaceholderText("Brand EU")
-        self.platform = QComboBox(); self.platform.addItems(["TikTok"])
-        self.access = QLineEdit(); self.access.setEchoMode(QLineEdit.Password); self.access.setPlaceholderText("Access token")
-        self.refresh_token = QLineEdit(); self.refresh_token.setEchoMode(QLineEdit.Password); self.refresh_token.setPlaceholderText("Refresh token")
-        form.addRow("Profile", self.profile_name); form.addRow("Platform", self.platform)
-        form.addRow("Access token", self.access); form.addRow("Refresh token", self.refresh_token)
-        left.addLayout(form)
-        add = QPushButton("Add profile"); add.setObjectName("primaryButton"); add.clicked.connect(self.add_account)
-        left.addWidget(add); left.addStretch()
-
-        right = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(24, 0, 0, 0); right_layout.setSpacing(14)
-        toolbar = QHBoxLayout(); h = QLabel("Connected profiles"); h.setObjectName("sectionTitle")
-        remove = QPushButton("Remove selected"); remove.setObjectName("quietButton"); remove.clicked.connect(self.delete_account)
-        toolbar.addWidget(h); toolbar.addStretch(); toolbar.addWidget(remove); right_layout.addLayout(toolbar)
-        self.accounts = QTableWidget(0, 5)
-        self.accounts.setHorizontalHeaderLabels(["Profile", "Platform", "Token", "Last post", "Added"])
-        self.configure_table(self.accounts, stretch=0); right_layout.addWidget(self.accounts)
-        split.addWidget(panel); split.addWidget(right); split.setSizes([390, 770])
-        layout = QVBoxLayout(page); layout.setContentsMargins(0, 18, 0, 0); layout.addWidget(split)
-        return page
-
-    def processing_tab(self) -> QWidget:
+    def accounts_page(self) -> QWidget:
         page = QWidget(); layout = QGridLayout(page); layout.setContentsMargins(0, 18, 0, 0); layout.setHorizontalSpacing(24)
-        panel = QFrame(); panel.setObjectName("panel")
-        controls = QVBoxLayout(panel); controls.setContentsMargins(24, 24, 24, 24); controls.setSpacing(14)
-        h = QLabel("H.264 delivery batch"); h.setObjectName("sectionTitle")
-        note = QLabel("Creates standard resolution, CRF 20-23, light mobile sharpening, optional micro grain, and normalized AAC audio outputs.")
-        note.setWordWrap(True); note.setObjectName("muted")
-        controls.addWidget(h); controls.addWidget(note)
-        self.master = QLineEdit(); self.master.setReadOnly(True); self.master.setPlaceholderText("Master media file")
-        choose_master = QPushButton("Choose file"); choose_master.clicked.connect(self.choose_master)
-        row = QHBoxLayout(); row.addWidget(self.master, 1); row.addWidget(choose_master); controls.addLayout(row)
-        self.output = QLineEdit(); self.output.setReadOnly(True); self.output.setPlaceholderText("Output folder")
-        choose_output = QPushButton("Choose folder"); choose_output.clicked.connect(self.choose_output)
-        row2 = QHBoxLayout(); row2.addWidget(self.output, 1); row2.addWidget(choose_output); controls.addLayout(row2)
-        self.batch = QSpinBox(); self.batch.setRange(1, 100); self.batch.setValue(50); self.batch.setSuffix(" renditions")
-        controls.addWidget(self.batch)
-        self.render_button = QPushButton("Start batch"); self.render_button.setObjectName("primaryButton"); self.render_button.clicked.connect(self.start_render)
-        self.progress = QProgressBar(); self.progress.setValue(0)
-        controls.addWidget(self.render_button); controls.addWidget(self.progress); controls.addStretch()
-        log_side = QVBoxLayout(); lh = QLabel("Encoding log"); lh.setObjectName("sectionTitle")
-        self.console = QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumBlockCount(2000)
-        log_side.addWidget(lh); log_side.addWidget(self.console)
-        layout.addWidget(panel, 0, 0); layout.addLayout(log_side, 0, 1); layout.setColumnStretch(0, 2); layout.setColumnStretch(1, 3)
+        panel = QFrame(); panel.setObjectName("panel"); formbox = QVBoxLayout(panel)
+        formbox.setContentsMargins(24, 24, 24, 24); formbox.setSpacing(14)
+        heading = QLabel("Authorized profiles"); heading.setObjectName("section")
+        note = QLabel("OAuth credentials stay in your OS keychain. Nothing sensitive enters the state file or logs.")
+        note.setWordWrap(True); note.setObjectName("muted"); formbox.addWidget(heading); formbox.addWidget(note)
+        form = QFormLayout(); self.profile_name = QLineEdit(); self.profile_name.setPlaceholderText("Brand EU")
+        form.addRow("Profile name", self.profile_name); formbox.addLayout(form)
+        buttons = QHBoxLayout(); add = QPushButton("Add profile"); add.setObjectName("primary"); add.clicked.connect(self.add_profile)
+        auth = QPushButton("Authorize selected"); auth.clicked.connect(self.authorize_selected)
+        buttons.addWidget(add); buttons.addWidget(auth); formbox.addLayout(buttons); formbox.addStretch()
+        right = QVBoxLayout(); bar = QHBoxLayout(); label = QLabel("Profile matrix"); label.setObjectName("section")
+        remove = QPushButton("Remove"); remove.clicked.connect(self.remove_profile)
+        bar.addWidget(label); bar.addStretch(); bar.addWidget(remove); right.addLayout(bar)
+        self.accounts = QTableWidget(0, 5); self.accounts.setHorizontalHeaderLabels(["Profile", "Platform", "OAuth", "Last post", "State"])
+        self.configure_table(self.accounts); right.addWidget(self.accounts)
+        layout.addWidget(panel, 0, 0); layout.addLayout(right, 0, 1); layout.setColumnStretch(1, 1)
         return page
 
-    def queue_tab(self) -> QWidget:
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 18, 0, 0); layout.setSpacing(18)
-        panel = QFrame(); panel.setObjectName("panel")
-        grid = QGridLayout(panel); grid.setContentsMargins(22, 18, 22, 18); grid.setSpacing(12)
-        self.queue_account = QComboBox(); self.queue_video = QLineEdit(); self.queue_video.setPlaceholderText("MP4 delivery file")
-        browse = QPushButton("Browse"); browse.clicked.connect(self.choose_queue_video)
-        video_row = QHBoxLayout(); video_row.addWidget(self.queue_video, 1); video_row.addWidget(browse)
-        self.queue_time = QDateTimeEdit(); self.queue_time.setCalendarPopup(True); self.queue_time.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.queue_time.setDateTime(datetime.now() + timedelta(minutes=10))
-        self.caption = QLineEdit(); self.caption.setPlaceholderText("Caption reviewed by the channel owner")
-        self.daily = QCheckBox("Repeat daily")
-        add = QPushButton("Queue compliant post"); add.setObjectName("primaryButton"); add.clicked.connect(self.add_job)
-        grid.addWidget(QLabel("Profile"), 0, 0); grid.addWidget(QLabel("Video"), 0, 1); grid.addWidget(QLabel("Run at"), 0, 2)
-        grid.addWidget(self.queue_account, 1, 0); grid.addLayout(video_row, 1, 1); grid.addWidget(self.queue_time, 1, 2)
-        grid.addWidget(QLabel("Caption"), 2, 0); grid.addWidget(self.caption, 3, 0, 1, 2); grid.addWidget(self.daily, 3, 2); grid.addWidget(add, 3, 3)
-        grid.setColumnStretch(1, 2); layout.addWidget(panel)
-        toolbar = QHBoxLayout(); h = QLabel("23-hour protected pipeline"); h.setObjectName("sectionTitle")
-        remove = QPushButton("Remove selected"); remove.setObjectName("quietButton"); remove.clicked.connect(self.delete_job)
+    def queue_page(self) -> QWidget:
+        page = QWidget(); outer = QVBoxLayout(page); outer.setContentsMargins(0, 18, 0, 0); outer.setSpacing(18)
+        controls = QFrame(); controls.setObjectName("panel"); grid = QGridLayout(controls)
+        grid.setContentsMargins(24, 22, 24, 22); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(12)
+        self.account_combo = QComboBox(); self.video = QLineEdit(); self.video.setPlaceholderText("Select a local video")
+        browse = QPushButton("Browse"); browse.clicked.connect(self.choose_video)
+        self.caption = QLineEdit(); self.caption.setPlaceholderText("Caption, up to 2,200 characters")
+        self.run_at = QDateTimeEdit(QDateTime.currentDateTime().addSecs(60)); self.run_at.setCalendarPopup(True); self.run_at.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.privacy = QComboBox(); self.privacy.addItems(["SELF_ONLY", "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR"])
+        grid.addWidget(QLabel("Profile"), 0, 0); grid.addWidget(self.account_combo, 0, 1)
+        grid.addWidget(QLabel("Video"), 0, 2); grid.addWidget(self.video, 0, 3); grid.addWidget(browse, 0, 4)
+        grid.addWidget(QLabel("Caption"), 1, 0); grid.addWidget(self.caption, 1, 1, 1, 2)
+        grid.addWidget(QLabel("Run at"), 1, 3); grid.addWidget(self.run_at, 1, 4)
+        grid.addWidget(QLabel("Privacy"), 2, 0); grid.addWidget(self.privacy, 2, 1)
+        queue = QPushButton("Queue post"); queue.setObjectName("primary"); queue.clicked.connect(self.queue_post)
         run = QPushButton("Run due now"); run.clicked.connect(self.run_due)
-        toolbar.addWidget(h); toolbar.addStretch(); toolbar.addWidget(remove); toolbar.addWidget(run); layout.addLayout(toolbar)
-        self.jobs = QTableWidget(0, 6)
-        self.jobs.setHorizontalHeaderLabels(["Profile", "Asset", "Next deployment", "Cadence", "State", "Publish ID"])
-        self.configure_table(self.jobs, stretch=1); layout.addWidget(self.jobs, 1)
+        grid.addWidget(queue, 2, 3); grid.addWidget(run, 2, 4); grid.setColumnStretch(3, 1)
+        outer.addWidget(controls)
+        self.jobs = QTableWidget(0, 8); self.jobs.setHorizontalHeaderLabels(["Profile", "Video", "Run at", "State", "Progress", "Server", "Attempts", "Error"])
+        self.configure_table(self.jobs); outer.addWidget(self.jobs, 1)
+        self.job_progress = QProgressBar(); self.job_progress.setRange(0, 100); self.job_progress.setValue(0); outer.addWidget(self.job_progress)
         return page
+
+    def settings_page(self) -> QWidget:
+        page = QWidget(); layout = QHBoxLayout(page); layout.setContentsMargins(0, 18, 0, 0)
+        panel = QFrame(); panel.setObjectName("panel"); box = QVBoxLayout(panel); box.setContentsMargins(28, 26, 28, 28); box.setSpacing(16)
+        title = QLabel("TikTok application credentials"); title.setObjectName("section"); box.addWidget(title)
+        note = QLabel("Use a localhost redirect registered in TikTok Developer Portal, for example http://127.0.0.1:3455/callback/.")
+        note.setWordWrap(True); note.setObjectName("muted"); box.addWidget(note)
+        form = QFormLayout(); client_key, _, redirect = self.vault.app()
+        self.client_key = QLineEdit(client_key); self.client_secret = QLineEdit(); self.client_secret.setEchoMode(QLineEdit.Password)
+        self.redirect_uri = QLineEdit(redirect or "http://127.0.0.1:3455/callback/")
+        form.addRow("Client Key", self.client_key); form.addRow("Client Secret", self.client_secret); form.addRow("Redirect URI", self.redirect_uri)
+        box.addLayout(form); save = QPushButton("Save to OS keychain"); save.setObjectName("primary"); save.clicked.connect(self.save_settings)
+        box.addWidget(save); box.addStretch(); layout.addWidget(panel, 1); layout.addStretch(1); return page
 
     @staticmethod
-    def configure_table(table: QTableWidget, stretch: int) -> None:
-        table.setSelectionBehavior(QTableWidget.SelectRows); table.setSelectionMode(QTableWidget.SingleSelection)
+    def configure_table(table: QTableWidget) -> None:
+        table.setAlternatingRowColors(True); table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setEditTriggers(QTableWidget.NoEditTriggers); table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(stretch, QHeaderView.Stretch)
-        for column in range(table.columnCount()):
-            if column != stretch: table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
 
-    def apply_style(self) -> None:
-        palette = QPalette(); palette.setColor(QPalette.Window, QColor("#11130f")); palette.setColor(QPalette.WindowText, QColor("#ebe9df"))
-        palette.setColor(QPalette.Base, QColor("#171a15")); palette.setColor(QPalette.Text, QColor("#ebe9df")); palette.setColor(QPalette.Button, QColor("#24291f"))
-        palette.setColor(QPalette.ButtonText, QColor("#ebe9df")); palette.setColor(QPalette.Highlight, QColor("#c7f36b")); palette.setColor(QPalette.HighlightedText, QColor("#12150f"))
-        self.setPalette(palette); self.setFont(QFont("Segoe UI", 10))
+    def apply_theme(self) -> None:
+        palette = QPalette(); palette.setColor(QPalette.Window, QColor("#101312")); palette.setColor(QPalette.WindowText, QColor("#e7ece8"))
+        palette.setColor(QPalette.Base, QColor("#151a18")); palette.setColor(QPalette.AlternateBase, QColor("#1a201d"))
+        palette.setColor(QPalette.Text, QColor("#e7ece8")); palette.setColor(QPalette.Button, QColor("#202723")); palette.setColor(QPalette.ButtonText, QColor("#e7ece8"))
+        palette.setColor(QPalette.Highlight, QColor("#71d49a")); palette.setColor(QPalette.HighlightedText, QColor("#0d1610")); self.setPalette(palette)
         self.setStyleSheet("""
-            QMainWindow,QWidget{background:#11130f;color:#ebe9df} QLabel#eyebrow{color:#c7f36b;font-size:11px;font-weight:700;letter-spacing:2px}
-            QLabel#title{font-size:28px;font-weight:650;color:#f0eee5} QLabel#sectionTitle{font-size:18px;font-weight:650;color:#f0eee5}
-            QLabel#muted{color:#a8ad9f} QLabel#statusPill{background:#1f2917;color:#c7f36b;border:1px solid #39472b;border-radius:15px;padding:7px 12px;font-size:10px;font-weight:700}
-            QFrame#panel{background:#181b16;border:1px solid #2d3228;border-radius:12px} QTabWidget::pane{border:0}
-            QTabBar::tab{background:transparent;color:#969c8d;padding:11px 18px;margin-right:4px;border-bottom:2px solid transparent}
-            QTabBar::tab:hover{color:#dad9d0} QTabBar::tab:selected{color:#f0eee5;border-bottom:2px solid #c7f36b}
-            QLineEdit,QSpinBox,QComboBox,QDateTimeEdit,QPlainTextEdit{background:#141712;color:#ebe9df;border:1px solid #343a2e;border-radius:7px;padding:9px 10px;selection-background-color:#c7f36b;selection-color:#12150f}
-            QLineEdit:focus,QSpinBox:focus,QComboBox:focus,QDateTimeEdit:focus,QPlainTextEdit:focus{border:2px solid #98bd4f;padding:8px 9px}
-            QPushButton{min-height:38px;background:#24291f;color:#e7e5dc;border:1px solid #373d31;border-radius:7px;padding:0 15px;font-weight:600}
-            QPushButton:hover{background:#2c3325;border-color:#4a5340} QPushButton:disabled{color:#686d62;background:#1a1d17;border-color:#282c24}
-            QPushButton#primaryButton{background:#c7f36b;color:#15180f;border-color:#c7f36b;font-weight:750} QPushButton#primaryButton:hover{background:#d4fb81;border-color:#d4fb81}
-            QPushButton#quietButton{background:transparent;color:#b9bdb1} QTableWidget{background:#151813;border:1px solid #2d3228;border-radius:9px;gridline-color:#292e25;selection-background-color:#29331f;selection-color:#f0eee5}
-            QHeaderView::section{background:#1d211a;color:#9fa596;border:0;border-bottom:1px solid #343a2e;padding:10px;font-size:11px;font-weight:700}
-            QTableWidget::item{padding:9px} QProgressBar{background:#1b1f18;color:#dfe2d7;border:1px solid #30362b;border-radius:6px;text-align:center;min-height:20px}
-            QProgressBar::chunk{background:#98bd4f;border-radius:5px} QSplitter::handle{background:transparent;width:10px}
-            QCheckBox{color:#c9ccc2;spacing:8px} QCheckBox::indicator{width:17px;height:17px;border:1px solid #4a5143;border-radius:4px;background:#151813}
-            QCheckBox::indicator:checked{background:#c7f36b;border-color:#c7f36b}
+            QWidget { color:#e7ece8; font-family:'Segoe UI'; font-size:13px; }
+            QMainWindow { background:#101312; } QTabWidget::pane { border:0; }
+            QTabBar::tab { padding:11px 18px; color:#89958e; border-bottom:2px solid transparent; }
+            QTabBar::tab:selected { color:#e7ece8; border-bottom-color:#71d49a; }
+            QFrame#panel { background:#171c19; border:1px solid #28312c; border-radius:12px; }
+            QLabel#eyebrow { color:#71d49a; font-size:11px; font-weight:700; letter-spacing:2px; }
+            QLabel#title { font-size:28px; font-weight:700; } QLabel#section { font-size:18px; font-weight:700; }
+            QLabel#muted { color:#98a29c; } QLabel#pill { background:#20372a; color:#8ee0ac; padding:7px 13px; border-radius:12px; font-weight:700; }
+            QLineEdit,QComboBox,QDateTimeEdit,QSpinBox { background:#111512; border:1px solid #344039; border-radius:7px; padding:9px; min-height:20px; }
+            QLineEdit:focus,QComboBox:focus,QDateTimeEdit:focus { border:1px solid #71d49a; }
+            QPushButton { background:#252d28; border:1px solid #39463e; border-radius:7px; padding:9px 14px; min-height:20px; }
+            QPushButton:hover { background:#2d3831; } QPushButton:pressed { background:#1d2520; }
+            QPushButton#primary { background:#71d49a; color:#102016; border:0; font-weight:700; }
+            QPushButton#primary:hover { background:#82dfa6; }
+            QTableWidget { background:#131714; alternate-background-color:#171c19; border:1px solid #28312c; border-radius:9px; gridline-color:#27302b; }
+            QHeaderView::section { background:#1e2521; color:#aab4ae; padding:9px; border:0; border-bottom:1px solid #344039; font-weight:700; }
+            QProgressBar { background:#1b211d; border:1px solid #344039; border-radius:6px; text-align:center; min-height:18px; }
+            QProgressBar::chunk { background:#71d49a; border-radius:5px; }
         """)
 
-    def log(self, message: str) -> None:
-        self.console.appendPlainText(f"{datetime.now().strftime('%H:%M:%S')}  {message}")
-        self.logger.info(message)
+    def selected_account_id(self) -> str:
+        row = self.accounts.currentRow()
+        return self.accounts.item(row, 0).data(Qt.UserRole) if row >= 0 and self.accounts.item(row, 0) else ""
 
-    def error(self, title: str, detail: str) -> None:
-        short = detail.strip().splitlines()[-1] if detail.strip() else "Unknown error"
-        self.logger.error("%s: %s", title, detail); self.log(f"ERROR  {short}"); QMessageBox.critical(self, title, short)
-
-    def retain_task(self, task: BackgroundTask) -> None:
-        self.tasks.add(task)
-        task.signals.finished.connect(lambda: self.tasks.discard(task))
-        task.start()
-
-    def selected_id(self, table: QTableWidget) -> str:
-        row = table.currentRow()
-        return table.item(row, 0).data(Qt.UserRole) if row >= 0 and table.item(row, 0) else ""
-
-    def refresh(self) -> None:
-        state = self.registry.snapshot(); accounts = state["accounts"]
-        self.accounts.setRowCount(len(accounts)); self.queue_account.clear()
-        for row, account in enumerate(accounts):
-            last = from_iso(account["last_post_at"]).astimezone().strftime("%Y-%m-%d %H:%M") if account.get("last_post_at") else "Never"
-            token = "Refresh soon" if from_iso(account["token_expires_at"]) <= now_utc() + timedelta(minutes=5) else "Ready"
-            values = (account["profile_name"], account["platform"], token, last, from_iso(account["created_at"]).astimezone().strftime("%Y-%m-%d"))
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value); item.setData(Qt.UserRole, account["id"]); self.accounts.setItem(row, col, item)
-            self.queue_account.addItem(account["profile_name"], account["id"])
-        names = {a["id"]: a["profile_name"] for a in accounts}; jobs = sorted(state["jobs"], key=lambda j: j["run_at"])
-        self.jobs.setRowCount(len(jobs))
-        for row, job in enumerate(jobs):
-            values = (names.get(job["account_id"], "Removed"), Path(job["video_path"]).name,
-                      from_iso(job["run_at"]).astimezone().strftime("%Y-%m-%d %H:%M"),
-                      "Daily" if job["repeat_daily"] else "Once", job["status"].title(), job.get("publish_id", "")[:18])
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value); item.setData(Qt.UserRole, job["id"]); item.setToolTip(job.get("last_error", "")); self.jobs.setItem(row, col, item)
-        self.status.setText(f"{len(accounts)} PROFILES / {len(jobs)} JOBS")
-
-    def add_account(self) -> None:
-        if not all((self.profile_name.text().strip(), self.access.text().strip(), self.refresh_token.text().strip())):
-            return self.error("Missing details", "Profile name, access token, and refresh token are required")
+    def add_profile(self) -> None:
         try:
-            account = self.registry.add_account(self.profile_name.text(), self.platform.currentText())
-            try: self.secrets.set(account["id"], self.access.text().strip(), self.refresh_token.text().strip())
-            except Exception:
-                self.registry.delete_account(account["id"]); raise
-            self.profile_name.clear(); self.access.clear(); self.refresh_token.clear(); self.log(f"Added {account['profile_name']}"); self.refresh()
-        except Exception as exc: self.error("Could not add profile", str(exc))
+            self.registry.add_account(self.profile_name.text()); self.profile_name.clear(); self.refresh()
+        except Exception as exc: self.show_error(str(exc))
 
-    def delete_account(self) -> None:
-        account_id = self.selected_id(self.accounts)
-        if not account_id: return self.error("Nothing selected", "Select a profile first")
-        self.registry.delete_account(account_id); self.secrets.delete(account_id); self.log("Removed profile and its queue"); self.refresh()
+    def remove_profile(self) -> None:
+        account_id = self.selected_account_id()
+        if not account_id: return
+        try:
+            self.registry.delete_account(account_id); self.vault.delete_account(account_id); self.refresh()
+        except Exception as exc: self.show_error(str(exc))
 
-    def choose_master(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Choose master media", "", "Media (*.mp4 *.mov *.mkv *.webm)")
-        if path:
-            self.master.setText(path)
-            if not self.output.text(): self.output.setText(str(Path(path).parent / f"{Path(path).stem}-renditions"))
+    def authorize_selected(self) -> None:
+        account_id = self.selected_account_id()
+        if not account_id: self.show_error("Select a profile first"); return
+        if self.oauth_worker and self.oauth_worker.isRunning(): return
+        self.global_status.setText("AUTHORIZING")
+        worker = OAuthThread(self.vault); self.oauth_worker = worker
+        worker.succeeded.connect(lambda result: self.oauth_success(account_id, result))
+        worker.failed.connect(lambda text: (self.show_error(text), self.global_status.setText("READY")))
+        worker.finished.connect(lambda: setattr(self, "oauth_worker", None)); worker.start()
 
-    def choose_output(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Choose output folder")
-        if path: self.output.setText(path)
+    def oauth_success(self, account_id: str, result: OAuthResult) -> None:
+        try:
+            self.vault.set_tokens(account_id, result.access_token, result.refresh_token)
+            self.registry.update_account(account_id, token_expires_at=iso(utc_now() + timedelta(seconds=result.expires_in)), last_status="Authorized")
+            self.global_status.setText("READY"); self.refresh()
+        except Exception as exc: self.show_error(str(exc))
 
-    def start_render(self) -> None:
-        master, output = Path(self.master.text()), Path(self.output.text())
-        if not master.is_file() or not self.output.text(): return self.error("Missing input", "Choose a master media file and output folder")
-        self.render_button.setEnabled(False); self.progress.setValue(0)
-        task = BackgroundTask(lambda signals: self.engine.render(master, output, self.batch.value(), signals))
-        task.signals.log.connect(self.log); task.signals.progress.connect(self.progress.setValue)
-        task.signals.error.connect(lambda detail: self.error("Encoding failed", detail))
-        task.signals.result.connect(self.render_done); task.signals.finished.connect(lambda: self.render_button.setEnabled(True))
-        self.retain_task(task)
+    def save_settings(self) -> None:
+        key, secret, redirect = self.client_key.text().strip(), self.client_secret.text().strip(), self.redirect_uri.text().strip()
+        if not all((key, secret, redirect)): self.show_error("All API settings are required"); return
+        try:
+            self.vault.set_app(key, secret, redirect); self.client_secret.clear(); QMessageBox.information(self, APP_NAME, "Saved to the OS keychain.")
+        except Exception as exc: self.show_error(str(exc))
 
-    def render_done(self, result: object) -> None:
-        self.last_outputs = list(result or [])
-        if self.last_outputs: self.queue_video.setText(self.last_outputs[0])
-        self.log(f"Completed {len(self.last_outputs)} compliant renditions")
+    def choose_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select video", "", "Videos (*.mp4 *.mov *.m4v *.webm)")
+        if path: self.video.setText(path)
 
-    def choose_queue_video(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Choose delivery file", "", "MP4 (*.mp4)")
-        if path: self.queue_video.setText(path)
-
-    def add_job(self) -> None:
-        local = self.queue_time.dateTime().toPython()
+    def queue_post(self) -> None:
+        account_id = self.account_combo.currentData()
+        local = self.run_at.dateTime().toPython()
         if local.tzinfo is None: local = local.astimezone()
-        if not self.queue_account.currentData() or not Path(self.queue_video.text()).is_file() or not self.caption.text().strip():
-            return self.error("Incomplete schedule", "Choose a profile, existing MP4, and caption")
         try:
-            self.registry.add_job(self.queue_account.currentData(), self.queue_video.text(), self.caption.text(), local.astimezone(UTC), self.daily.isChecked())
-            self.caption.clear(); self.log("Queued post with the deterministic 23-hour guard"); self.refresh()
-        except Exception as exc: self.error("Could not queue post", str(exc))
-
-    def delete_job(self) -> None:
-        job_id = self.selected_id(self.jobs)
-        if not job_id: return self.error("Nothing selected", "Select a queue row first")
-        if job_id in self.running_jobs: return self.error("Job is running", "Wait for the upload to finish")
-        self.registry.delete_job(job_id); self.log("Removed queued post"); self.refresh()
+            self.registry.add_job(account_id, self.video.text(), self.caption.text(), local.astimezone(UTC), self.privacy.currentText())
+            self.video.clear(); self.caption.clear(); self.refresh(); self.run_due()
+        except Exception as exc: self.show_error(str(exc))
 
     def run_due(self) -> None:
-        for candidate in self.registry.snapshot()["jobs"]:
-            if candidate["status"] != "queued" or from_iso(candidate["run_at"]) > now_utc() or candidate["id"] in self.running_jobs: continue
-            try:
-                job, account = self.registry.claim_due_job(candidate["id"])
-            except Exception as exc:
-                self.registry.fail_job(candidate["id"], str(exc)); self.log(f"Guard blocked job: {exc}"); continue
-            self.running_jobs.add(job["id"])
-            task = BackgroundTask(lambda signals, j=job, a=account: self.publisher.publish(a, j, signals))
-            task.signals.log.connect(self.log)
-            task.signals.result.connect(lambda publish_id, j=job: self.job_ok(j, str(publish_id)))
-            task.signals.error.connect(lambda detail, j=job: self.job_failed(j, detail))
-            task.signals.finished.connect(lambda job_id=job["id"]: self.job_finished(job_id))
-            self.retain_task(task)
+        try:
+            state = self.registry.snapshot(); now = utc_now()
+            for job in state["jobs"]:
+                if job["status"] != "queued" or parse_iso(job["run_at"]) > now or job["id"] in self.workers: continue
+                try: claimed, account = self.registry.claim_job(job["id"])
+                except StateError: continue
+                worker = UploadThread(self.registry, self.vault, claimed, account); self.workers[job["id"]] = worker
+                worker.progress_changed.connect(self.worker_progress); worker.succeeded.connect(self.worker_success); worker.failed.connect(self.worker_failed)
+                worker.finished.connect(lambda job_id=job["id"]: self.worker_finished(job_id)); worker.start()
+            if self.workers: self.global_status.setText(f"{len(self.workers)} ACTIVE")
+        except Exception as exc:
+            LOGGER.exception("Scheduler pass failed"); self.show_error(str(exc))
+
+    def worker_progress(self, _: str, value: int, text: str) -> None:
+        self.job_progress.setValue(value); self.global_status.setText(text.upper()[:28]); self.refresh()
+
+    def worker_success(self, _: str, __: str, status: str) -> None:
+        self.job_progress.setValue(100); self.global_status.setText(status.replace("_", " ")); self.refresh()
+
+    def worker_failed(self, _: str, message: str) -> None:
+        self.global_status.setText("ATTENTION"); self.show_error(message); self.refresh()
+
+    def worker_finished(self, job_id: str) -> None:
+        worker = self.workers.pop(job_id, None)
+        if worker: worker.deleteLater()
+        if not self.workers: self.global_status.setText("READY")
         self.refresh()
 
-    def job_ok(self, job: dict[str, Any], publish_id: str) -> None:
-        self.registry.complete_job(job["id"], publish_id); self.log(f"TikTok accepted publish ID {publish_id}"); self.refresh()
+    def refresh(self) -> None:
+        try: state = self.registry.snapshot()
+        except Exception as exc: self.show_error(str(exc)); return
+        selected_combo = self.account_combo.currentData() if hasattr(self, "account_combo") else None
+        self.accounts.setRowCount(len(state["accounts"]))
+        for row, account in enumerate(state["accounts"]):
+            values = [account["name"], account["platform"], "Ready" if account.get("token_expires_at") else "Required",
+                      account.get("last_post_at", "")[:19].replace("T", " ") or "Never", account.get("last_status", "")]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value));
+                if col == 0: item.setData(Qt.UserRole, account["id"])
+                self.accounts.setItem(row, col, item)
+        self.account_combo.blockSignals(True); self.account_combo.clear()
+        for account in state["accounts"]: self.account_combo.addItem(account["name"], account["id"])
+        index = self.account_combo.findData(selected_combo)
+        if index >= 0: self.account_combo.setCurrentIndex(index)
+        self.account_combo.blockSignals(False)
+        names = {a["id"]: a["name"] for a in state["accounts"]}; jobs = sorted(state["jobs"], key=lambda j: j["created_at"], reverse=True)
+        self.jobs.setRowCount(len(jobs))
+        for row, job in enumerate(jobs):
+            values = [names.get(job["account_id"], "Removed"), Path(job["video_path"]).name,
+                      job["run_at"][:19].replace("T", " "), job["status"], f"{job.get('progress', 0)}%",
+                      job.get("server_status", ""), job.get("attempts", 0), job.get("last_error", "")]
+            for col, value in enumerate(values): self.jobs.setItem(row, col, QTableWidgetItem(str(value)))
 
-    def job_failed(self, job: dict[str, Any], detail: str) -> None:
-        short = detail.strip().splitlines()[-1] if detail.strip() else "Unknown error"
-        self.registry.fail_job(job["id"], short); self.error("Scheduled upload failed", detail); self.refresh()
+    def show_error(self, message: str) -> None:
+        LOGGER.error("UI error: %s", message.replace("\n", " ")[:1000])
+        QMessageBox.critical(self, APP_NAME, message)
 
-    def job_finished(self, job_id: str) -> None:
-        self.running_jobs.discard(job_id); self.refresh()
+    def closeEvent(self, event: Any) -> None:
+        active = list(self.workers.values())
+        for worker in active: worker.cancel()
+        if self.oauth_worker: self.oauth_worker.cancel()
+        deadline = time.monotonic() + 5
+        for worker in active:
+            worker.wait(max(0, int((deadline - time.monotonic()) * 1000)))
+        event.accept()
+
+
+def excepthook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+    LOGGER.critical("Unhandled exception", exc_info=(exc_type, exc, tb))
 
 
 def main() -> int:
-    app = QApplication(sys.argv); app.setApplicationName(APP_NAME); app.setOrganizationName("SignalDesk"); app.setStyle("Fusion")
-    window = MainWindow(); window.show(); return app.exec()
+    sys.excepthook = excepthook
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME); app.setOrganizationName("SignalDesk"); app.setStyle("Fusion")
+    font = QFont("Segoe UI", 10); app.setFont(font)
+    window = MainWindow(); window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
