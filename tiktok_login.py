@@ -10,6 +10,7 @@ import keyring
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
 import copyright_dialog
+import copyright_policy
 import tiktok_overlays
 
 SERVICE = "signaldesk-tiktok-web-login"
@@ -158,15 +159,19 @@ def install(web_uploader: Any):
             }])
         return context
 
-    def confirm_publish_dialog(page):
+    def first_profile_confirm(page):
         if handle_copyright_publish_dialog(page):
             return
         original_confirm(page)
 
+    def no_copyright_confirm(page):
+        # Later accounts already disabled content checks via the Kapat onboarding
+        # action. Do not search for or click Hemen paylaş on 2.mp4 and later.
+        return None
+
     def dismiss_pre_caption_notice(
         page, status=None, timeout_seconds=45, optional_after_seconds=8
     ):
-        # Upload selection can trigger another sequence of Kapat/Anladım dialogs.
         tiktok_overlays.clear_new_account_overlays(
             page, status=status, timeout_seconds=12, quiet_seconds=1.2
         )
@@ -174,7 +179,6 @@ def install(web_uploader: Any):
             page, status=status, timeout_seconds=timeout_seconds,
             optional_after_seconds=optional_after_seconds,
         )
-        # TikTok may chain several Anladım dialogs after the first one.
         tiktok_overlays.clear_new_account_overlays(
             page, status=status, timeout_seconds=12, quiet_seconds=1.2
         )
@@ -182,27 +186,37 @@ def install(web_uploader: Any):
 
     def prepare(request, publish=False, approval=None, status=None):
         original_wait = web_uploader.wait_for_upload_after_login
+        previous_confirm = web_uploader.confirm_publish_dialog
+        is_first = copyright_policy.is_first_profile_video(request.video)
 
         def waiter(page, timeout_seconds=900, status=None):
             result = wait_for_upload_after_login(
                 page, timeout_seconds, status, request.profile
             )
-            # New profile order: optional cookie -> Kapat -> every Anladım.
             tiktok_overlays.clear_new_account_overlays(
                 page, status=status, timeout_seconds=20, quiet_seconds=1.5
             )
             return result
 
         web_uploader.wait_for_upload_after_login = waiter
+        web_uploader.confirm_publish_dialog = (
+            first_profile_confirm if is_first else no_copyright_confirm
+        )
+        if status:
+            status(
+                f"{request.profile}: telif onayı "
+                + ("yalnız ilk profil için etkin" if is_first else "atlanıyor")
+            )
         try:
             return original_prepare(
                 request, publish=publish, approval=approval, status=status
             )
         finally:
             web_uploader.wait_for_upload_after_login = original_wait
+            web_uploader.confirm_publish_dialog = previous_confirm
 
     web_uploader.launch_context = launch
-    web_uploader.confirm_publish_dialog = confirm_publish_dialog
+    web_uploader.confirm_publish_dialog = first_profile_confirm
     web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
     web_uploader.prepare_upload = prepare
     web_uploader._signaldesk_login_installed = True
