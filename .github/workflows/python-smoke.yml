@@ -54,6 +54,7 @@ jobs:
       python originality_qa_test.py
       python auto_publish_flow_test.py
       python upload_state_test.py
+      python upload_retry_test.py
    - name: Updater contract
      run: python updater_contract_test.py
    - name: App TR layout startup smoke
