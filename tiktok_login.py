@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Profile-scoped TikTok session, onboarding, and publish-dialog assistance."""
+"""Profile-scoped TikTok session bootstrap and upload-login verification."""
 
 import re
 import time
@@ -12,281 +12,163 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 import copyright_dialog
 import preflight_hook
 import tiktok_overlays
+import tiktok_session_bundle
 
 SERVICE = "signaldesk-tiktok-web-login"
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
-SESSION_COOKIE_NAMES = ("sessionid", "sessionid_ss")
+SESSION_COOKIE_NAMES = tiktok_session_bundle.AUTH_COOKIE_NAMES
 
-
-class LoginError(RuntimeError):
- pass
-
+class LoginError(RuntimeError): pass
 
 def _key(profile: str, field: str) -> str:
- clean = re.sub(r"[^a-zA-Z0-9_.-]+", "-", profile.strip()).strip("-.")[:80]
- if not clean:
-  raise LoginError("Profil adı geçersiz")
+ clean=re.sub(r"[^a-zA-Z0-9_.-]+","-",profile.strip()).strip("-.")[:80]
+ if not clean: raise LoginError("Profil adı geçersiz")
  return f"{clean}:{field}"
 
-
 def _session_value(raw: str) -> str:
- value = raw.strip()
- match = re.search(r"(?:^|;\s*)sessionid(?:_ss)?=([^;\s]+)", value, re.I)
- value = match.group(1) if match else value
- if not value or len(value) < 16 or re.search(r"\s", value):
-  raise LoginError("Geçerli bir TikTok sessionid girin")
- return value
-
+ try: return tiktok_session_bundle.parse(raw)["sessionid"]
+ except ValueError as exc: raise LoginError(str(exc)) from exc
 
 def save_session(profile: str, value: str) -> None:
- keyring.set_password(SERVICE, _key(profile, "sessionid"), _session_value(value))
-
+ try: rows=tiktok_session_bundle.parse(value)
+ except ValueError as exc: raise LoginError(str(exc)) from exc
+ keyring.set_password(SERVICE,_key(profile,"cookies"),tiktok_session_bundle.dumps(rows))
+ keyring.set_password(SERVICE,_key(profile,"sessionid"),rows["sessionid"])
 
 def load_session(profile: str) -> str:
+ try: return keyring.get_password(SERVICE,_key(profile,"sessionid")) or ""
+ except Exception: return ""
+
+def load_session_cookies(profile: str) -> dict[str,str]:
  try:
-  return keyring.get_password(SERVICE, _key(profile, "sessionid")) or ""
- except Exception:
-  return ""
+  saved=keyring.get_password(SERVICE,_key(profile,"cookies")) or ""
+  if saved: return tiktok_session_bundle.loads(saved)
+ except Exception: pass
+ legacy=load_session(profile)
+ return tiktok_session_bundle.parse(legacy) if legacy else {}
 
-
-def has_session(profile: str) -> bool:
- return bool(load_session(profile))
-
-
+def has_session(profile: str) -> bool: return bool(load_session_cookies(profile))
 def delete_session(profile: str) -> None:
- try:
-  keyring.delete_password(SERVICE, _key(profile, "sessionid"))
- except Exception:
-  pass
+ for field in ("sessionid","cookies"):
+  try: keyring.delete_password(SERVICE,_key(profile,field))
+  except Exception: pass
 
+def save_credentials(profile: str,identity: str,password: str)->None:
+ if not identity.strip() or not password: raise LoginError("Kullanıcı ve parola birlikte girilmeli")
+ keyring.set_password(SERVICE,_key(profile,"identity"),identity.strip()); keyring.set_password(SERVICE,_key(profile,"password"),password)
+def load_credentials(profile: str)->tuple[str,str]:
+ try:return (keyring.get_password(SERVICE,_key(profile,"identity")) or "",keyring.get_password(SERVICE,_key(profile,"password")) or "")
+ except Exception:return "",""
+def has_credentials(profile: str)->bool:return all(load_credentials(profile))
 
-def save_credentials(profile: str, identity: str, password: str) -> None:
- if not identity.strip() or not password:
-  raise LoginError("Kullanıcı ve parola birlikte girilmeli")
- keyring.set_password(SERVICE, _key(profile, "identity"), identity.strip())
- keyring.set_password(SERVICE, _key(profile, "password"), password)
+def _visible(locator,timeout=400):
+ try:return bool(locator.count() and locator.first.is_visible(timeout=timeout))
+ except (PlaywrightTimeout,PlaywrightError):return False
+def locator_attached(locator)->bool:
+ try:return locator.count()>0
+ except PlaywrightError:return False
+def file_input_ready(page)->bool:
+ try:return locator_attached(page.locator('input[type="file"]'))
+ except PlaywrightError:return False
 
-
-def load_credentials(profile: str) -> tuple[str, str]:
- try:
-  return (
-   keyring.get_password(SERVICE, _key(profile, "identity")) or "",
-   keyring.get_password(SERVICE, _key(profile, "password")) or "",
-  )
- except Exception:
-  return "", ""
-
-
-def has_credentials(profile: str) -> bool:
- identity, password = load_credentials(profile)
- return bool(identity and password)
-
-
-def _visible(locator, timeout: int = 400) -> bool:
- try:
-  return bool(locator.count() and locator.first.is_visible(timeout=timeout))
- except (PlaywrightTimeout, PlaywrightError):
-  return False
-
-
-def locator_attached(locator) -> bool:
- try:
-  return locator.count() > 0
- except PlaywrightError:
-  return False
-
-
-def file_input_ready(page) -> bool:
- try:
-  return locator_attached(page.locator('input[type="file"]'))
- except PlaywrightError:
-  return False
-
-
-def _existing_session(context) -> dict[str, str]:
- found: dict[str, str] = {}
+def _existing_session(context)->dict[str,str]:
+ found={}
  try:
   for cookie in context.cookies(["https://www.tiktok.com"]):
-   name = str(cookie.get("name") or "")
-   value = str(cookie.get("value") or "")
-   if name in SESSION_COOKIE_NAMES and value:
-    found[name] = value
- except PlaywrightError:
-  pass
+   name=str(cookie.get("name") or ""); value=str(cookie.get("value") or "")
+   if name in SESSION_COOKIE_NAMES and value:found[name]=value
+ except PlaywrightError:pass
  return found
 
-
-def _clear_session_cookies(context) -> None:
+def _clear_auth_cookies(context)->None:
  for name in SESSION_COOKIE_NAMES:
-  try:
-   context.clear_cookies(name=name)
-  except (AttributeError, TypeError):
-   return
-  except PlaywrightError as exc:
-   raise LoginError(f"Eski TikTok {name} çerezi temizlenemedi") from exc
+  try:context.clear_cookies(name=name)
+  except (AttributeError,TypeError):return
+  except PlaywrightError as exc:raise LoginError(f"Eski TikTok {name} çerezi temizlenemedi") from exc
 
-
-def bootstrap_session(context, profile: str, force: bool = False) -> bool:
- """Install both TikTok session aliases before upload-page navigation."""
- session_id = load_session(profile)
- if not session_id:
-  return False
- existing = _existing_session(context)
- if not force and any(existing.get(name) == session_id for name in SESSION_COOKIE_NAMES):
-  return False
- _clear_session_cookies(context)
- cookies = [
-  {
-   "name": name,
-   "value": session_id,
-   "domain": ".tiktok.com",
-   "path": "/",
-   "secure": True,
-   "httpOnly": True,
-   "sameSite": "None",
-  }
-  for name in SESSION_COOKIE_NAMES
- ]
- try:
-  context.add_cookies(cookies)
- except PlaywrightError as exc:
-  raise LoginError(f"{profile}: Session ID tarayıcıya yüklenemedi") from exc
- installed = _existing_session(context)
- if installed and not all(installed.get(name) == session_id for name in SESSION_COOKIE_NAMES):
-  raise LoginError(f"{profile}: Session ID tarayıcıda doğrulanamadı")
+def bootstrap_session(context,profile: str,force: bool=False)->bool:
+ rows=load_session_cookies(profile)
+ if not rows:return False
+ existing=_existing_session(context)
+ if not force and all(existing.get(name)==value for name,value in rows.items()):return False
+ _clear_auth_cookies(context)
+ cookies=[{"name":name,"value":value,"domain":".tiktok.com","path":"/","secure":True,"httpOnly":True,"sameSite":"None"} for name,value in rows.items()]
+ try:context.add_cookies(cookies)
+ except PlaywrightError as exc:raise LoginError(f"{profile}: TikTok session çerezleri tarayıcıya yüklenemedi") from exc
+ installed=_existing_session(context)
+ missing=[name for name,value in rows.items() if installed.get(name)!=value]
+ if missing:raise LoginError(f"{profile}: Session çerezleri doğrulanamadı: {', '.join(missing)}")
  return True
 
-
 def _page_context(page):
- try:
-  return page.context
- except AttributeError:
-  return None
+ try:return page.context
+ except AttributeError:return None
 
-
-def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
- deadline = time.monotonic() + timeout_seconds
- identity, password = load_credentials(profile)
- attempted_credentials = False
- session_repairs = 0
- last_navigation = 0.0
- while time.monotonic() < deadline:
-  if page.is_closed():
-   raise LoginError("TikTok penceresi kapatıldı")
+def wait_for_upload_after_login(page,timeout_seconds=900,status=None,profile=""):
+ deadline=time.monotonic()+timeout_seconds; repaired=False; last_navigation=0.0
+ while time.monotonic()<deadline:
+  if page.is_closed():raise LoginError("TikTok penceresi kapatıldı")
   if file_input_ready(page):
-   if status:
-    status("TikTok Session ID doğrulandı; upload hazır")
+   if status:status("TikTok session doğrulandı; upload hazır")
    return
-  url = page.url.lower()
-  now = time.monotonic()
-  on_login = "/login" in url or _visible(page.locator('input[type="password"]'))
+  url=page.url.lower(); now=time.monotonic(); on_login="/login" in url or _visible(page.locator('input[type="password"]'))
   if on_login:
-   context = _page_context(page)
-   if context is not None and load_session(profile) and session_repairs < 2:
-    session_repairs += 1
-    bootstrap_session(context, profile, force=True)
-    if status:
-     status(f"{profile}: Session ID yenilendi, TikTok Studio tekrar açılıyor ({session_repairs}/2)")
+   context=_page_context(page)
+   if context is not None and has_session(profile) and not repaired:
+    repaired=True; bootstrap_session(context,profile,force=True)
+    if status:status(f"{profile}: session çerezleri yeniden kuruldu, upload tekrar açılıyor")
     try:
-     page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
-    except PlaywrightTimeout:
-     pass
-    page.wait_for_timeout(1200)
-    continue
-   if identity and password and not attempted_credentials:
-    attempted_credentials = True
-    if status:
-     status("Session ID TikTok tarafından reddedildi; kayıtlı hesapla görünür giriş gerekiyor")
-   elif status and load_session(profile):
-    status("Session ID TikTok tarafından kabul edilmedi; hesap için güncel sessionid kaydedin")
-   page.bring_to_front()
-   page.wait_for_timeout(1000)
-   continue
-  if "tiktokstudio/upload" not in url and now - last_navigation > 4:
-   try:
-    page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
-   except PlaywrightTimeout:
-    pass
-   last_navigation = now
-   continue
+     page.goto("https://www.tiktok.com/",wait_until="domcontentloaded",timeout=90000)
+     page.goto(UPLOAD_URL,wait_until="domcontentloaded",timeout=90000)
+    except PlaywrightTimeout:pass
+    page.wait_for_timeout(1500);continue
+   raise LoginError(
+    f"{profile}: TikTok kayıtlı session bilgisini reddetti. Session süresi dolmuş veya bu cihaz/proxy için geçersiz. "
+    "Hesabın güncel Cookie başlığını (sessionid, sessionid_ss ve varsa sid_guard/uid_tt) yeniden kaydedin."
+   )
+  if "tiktokstudio/upload" not in url and now-last_navigation>4:
+   try:page.goto(UPLOAD_URL,wait_until="domcontentloaded",timeout=90000)
+   except PlaywrightTimeout:pass
+   last_navigation=now;continue
   page.wait_for_timeout(750)
  raise LoginError("TikTok session/giriş doğrulaması tamamlanmadı")
 
-
-def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool:
- return copyright_dialog.handle(page, timeout_seconds)
-
+def handle_copyright_publish_dialog(page,timeout_seconds=20.0)->bool:return copyright_dialog.handle(page,timeout_seconds)
 
 def install(web_uploader: Any):
- if getattr(web_uploader, "_signaldesk_login_installed", False):
-  preflight_hook.install(web_uploader)
-  return
- original_launch = web_uploader.launch_context
- original_prepare = web_uploader.prepare_upload
- original_confirm = web_uploader.confirm_publish_dialog
- original_notice = web_uploader.dismiss_pre_caption_notice
- original_fill = web_uploader.fill_caption
- web_uploader.file_input_ready = file_input_ready
-
- def launch(playwright, profile):
-  context = original_launch(playwright, profile)
-  try:
-   bootstrap_session(context, profile, force=True)
+ if getattr(web_uploader,"_signaldesk_login_installed",False):preflight_hook.install(web_uploader);return
+ original_launch=web_uploader.launch_context; original_prepare=web_uploader.prepare_upload
+ original_confirm=web_uploader.confirm_publish_dialog; original_notice=web_uploader.dismiss_pre_caption_notice; original_fill=web_uploader.fill_caption
+ web_uploader.file_input_ready=file_input_ready
+ def launch(playwright,profile):
+  context=original_launch(playwright,profile)
+  try:bootstrap_session(context,profile,force=True)
   except Exception:
-   try:
-    context.close()
-   except Exception:
-    pass
+   try:context.close()
+   except Exception:pass
    raise
   return context
-
  def confirm_for_every_profile(page):
-  if handle_copyright_publish_dialog(page):
-   return
+  if handle_copyright_publish_dialog(page):return
   original_confirm(page)
-
- def dismiss_pre_caption_notice(page, status=None, timeout_seconds=45, optional_after_seconds=8):
-  tiktok_overlays.clear_new_account_overlays(page, status=status, timeout_seconds=12, quiet_seconds=1.2)
-  result = original_notice(
-   page, status=status, timeout_seconds=timeout_seconds,
-   optional_after_seconds=optional_after_seconds,
-  )
-  tiktok_overlays.clear_new_account_overlays(page, status=status, timeout_seconds=12, quiet_seconds=1.2)
-  return result
-
- def fill_caption_after_overlays(page, caption, timeout_seconds=180):
-  tiktok_overlays.clear_new_account_overlays(page, timeout_seconds=20, quiet_seconds=1.5)
-  try:
-   return original_fill(page, caption, timeout_seconds=timeout_seconds)
-  except (PlaywrightTimeout, PlaywrightError):
-   tiktok_overlays.clear_new_account_overlays(page, timeout_seconds=20, quiet_seconds=1.5)
-   return original_fill(page, caption, timeout_seconds=timeout_seconds)
-
- def prepare(request, publish=False, approval=None, status=None):
-  original_wait = web_uploader.wait_for_upload_after_login
-  previous_confirm = web_uploader.confirm_publish_dialog
-
-  def waiter(page, timeout_seconds=900, status=None):
-   result = wait_for_upload_after_login(page, timeout_seconds, status, request.profile)
-   tiktok_overlays.clear_new_account_overlays(
-    page, status=status, timeout_seconds=20, quiet_seconds=1.5,
-   )
-   return result
-
-  web_uploader.wait_for_upload_after_login = waiter
-  web_uploader.confirm_publish_dialog = confirm_for_every_profile
-  if status:
-   status(f"{request.profile}: Session ID ve içerik kontrolü hazırlanıyor")
-  try:
-   return original_prepare(request, publish=publish, approval=approval, status=status)
-  finally:
-   web_uploader.wait_for_upload_after_login = original_wait
-   web_uploader.confirm_publish_dialog = previous_confirm
-
- web_uploader.launch_context = launch
- web_uploader.confirm_publish_dialog = confirm_for_every_profile
- web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
- web_uploader.fill_caption = fill_caption_after_overlays
- web_uploader.prepare_upload = prepare
- web_uploader._signaldesk_login_installed = True
- preflight_hook.install(web_uploader)
+ def dismiss_pre_caption_notice(page,status=None,timeout_seconds=45,optional_after_seconds=8):
+  tiktok_overlays.clear_new_account_overlays(page,status=status,timeout_seconds=12,quiet_seconds=1.2)
+  result=original_notice(page,status=status,timeout_seconds=timeout_seconds,optional_after_seconds=optional_after_seconds)
+  tiktok_overlays.clear_new_account_overlays(page,status=status,timeout_seconds=12,quiet_seconds=1.2);return result
+ def fill_caption_after_overlays(page,caption,timeout_seconds=180):
+  tiktok_overlays.clear_new_account_overlays(page,timeout_seconds=20,quiet_seconds=1.5)
+  try:return original_fill(page,caption,timeout_seconds=timeout_seconds)
+  except (PlaywrightTimeout,PlaywrightError):
+   tiktok_overlays.clear_new_account_overlays(page,timeout_seconds=20,quiet_seconds=1.5);return original_fill(page,caption,timeout_seconds=timeout_seconds)
+ def prepare(request,publish=False,approval=None,status=None):
+  original_wait=web_uploader.wait_for_upload_after_login; previous_confirm=web_uploader.confirm_publish_dialog
+  def waiter(page,timeout_seconds=900,status=None):
+   result=wait_for_upload_after_login(page,timeout_seconds,status,request.profile)
+   tiktok_overlays.clear_new_account_overlays(page,status=status,timeout_seconds=20,quiet_seconds=1.5);return result
+  web_uploader.wait_for_upload_after_login=waiter; web_uploader.confirm_publish_dialog=confirm_for_every_profile
+  if status:status(f"{request.profile}: TikTok session paketi ve içerik kontrolü hazırlanıyor")
+  try:return original_prepare(request,publish=publish,approval=approval,status=status)
+  finally:web_uploader.wait_for_upload_after_login=original_wait; web_uploader.confirm_publish_dialog=previous_confirm
+ web_uploader.launch_context=launch; web_uploader.confirm_publish_dialog=confirm_for_every_profile
+ web_uploader.dismiss_pre_caption_notice=dismiss_pre_caption_notice; web_uploader.fill_caption=fill_caption_after_overlays
+ web_uploader.prepare_upload=prepare; web_uploader._signaldesk_login_installed=True; preflight_hook.install(web_uploader)
