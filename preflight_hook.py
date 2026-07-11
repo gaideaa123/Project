@@ -14,7 +14,7 @@ def install(web_uploader: Any) -> None:
 
     def prepare(request, publish=False, approval=None, status=None):
         if status:
-            status(f"{request.profile}: medya kalite ve tekrar kontrolü yapılıyor")
+            status(f"{request.profile}: medya kalite, exact tekrar ve caption tekrar kontrolü yapılıyor")
         report = content_preflight.validate(
             request.profile, request.video, request.caption
         )
@@ -22,7 +22,9 @@ def install(web_uploader: Any) -> None:
             request, publish=publish, approval=approval, status=status
         )
         if publish:
-            content_preflight.record(request.profile, report, "published")
+            content_preflight.record(
+                request.profile, report, "published", caption=request.caption
+            )
         return result
 
     web_uploader.prepare_upload = prepare
