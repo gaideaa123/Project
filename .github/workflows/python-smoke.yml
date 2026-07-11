@@ -28,7 +28,7 @@ jobs:
    - name: Compile production modules
      run: |
       python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py sitecustomize.py
-      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py target_reachability.py tiktok_login.py tiktok_overlays.py
+      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py target_reachability.py tiktok_login.py tiktok_overlays.py auto_publish_flow.py
       python -m py_compile antibot_resilience.py antibot_sandbox.py socks_bridge.py
       python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
       python -m py_compile utils/antibot_resilience.py utils/network_identity.py
@@ -45,10 +45,11 @@ jobs:
       python guide_proxy_assignment_test.py
       python direct_connection_policy_test.py
       python target_reachability_test.py
-   - name: Session ID bootstrap unit tests
-     run: python -m unittest -v session_publish_unit_tests.py
-   - name: Content check overlay test
-     run: python content_check_overlay_test.py
+   - name: Session and publish flow tests
+     run: |
+      python -m unittest -v session_publish_unit_tests.py
+      python content_check_overlay_test.py
+      python auto_publish_flow_test.py
    - name: Updater contract
      run: python updater_contract_test.py
    - name: App TR layout startup smoke
