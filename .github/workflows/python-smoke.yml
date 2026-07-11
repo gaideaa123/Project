@@ -25,10 +25,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-      - name: Compile publication modules
+      - name: Compile production modules
         run: |
-          python -m py_compile publication_guard.py web_upload_engine.py
-          python -m py_compile test_publication_integration.py zero_view_risk_smoke.py
+          python -m py_compile app.py app_tr.py oauth_helper.py media_qa.py
+          python -m py_compile antibot_resilience.py antibot_sandbox.py
+          python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
+          python -m py_compile utils/antibot_resilience.py utils/network_identity.py
+          python -m py_compile playwright_interactions.py user_assisted_playwright.py
+          python -m py_compile publication_guard.py test_publication_integration.py
       - name: Core GUI smoke
         run: python smoke_test.py
       - name: Preflight smoke
@@ -37,6 +41,10 @@ jobs:
         run: python media_qa_smoke.py
       - name: Defensive resilience smoke
         run: python antibot_resilience_smoke.py
+      - name: Assisted interaction unit tests
+        run: |
+          python -m unittest -v test_human_interactions.py
+          python -m unittest -v test_user_assisted_playwright.py
       - name: Zero-view risk gates
         run: python zero_view_risk_smoke.py
       - name: Publication integration tests
