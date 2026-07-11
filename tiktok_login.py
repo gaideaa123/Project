@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-"""Lower-risk profile-scoped TikTok web publishing.
+"""Profile-scoped TikTok web publishing with persistent session bootstrap.
 
-This keeps the required automatic final Publish click, but removes session-cookie
-injection and JavaScript-dispatched input/change events. It uses a normal visible
-Chrome profile, interactive login, Playwright's standard input actions and the
-existing explicit GUI approval before publication. No stealth/fingerprint patches
-or anti-bot bypasses are installed.
+A saved sessionid may bootstrap an empty persistent Chrome profile once. After
+TikTok establishes its normal first-party browser state, later runs reuse that
+profile and do not overwrite the session cookie on every upload. Automatic final
+Publish remains enabled after the application's explicit GUI approval.
 """
 
 import re
@@ -48,7 +47,6 @@ def _session_value(raw):
 
 
 def save_session(profile, value):
-    """Legacy UI compatibility only; automatic publishing never injects it."""
     keyring.set_password(SERVICE, _key(profile, "sessionid"), _session_value(value))
 
 
@@ -113,8 +111,42 @@ def file_input_ready(page) -> bool:
         return False
 
 
+def _existing_session_cookie(context) -> str:
+    """Read only the existing TikTok session from this persistent profile."""
+    try:
+        for cookie in context.cookies(["https://www.tiktok.com"]):
+            if cookie.get("name") in {"sessionid", "sessionid_ss"} and cookie.get("value"):
+                return str(cookie["value"])
+    except PlaywrightError:
+        pass
+    return ""
+
+
+def bootstrap_session(context, profile: str) -> bool:
+    """Inject sessionid only when the persistent profile has no TikTok session.
+
+    Returns True when a bootstrap cookie was added, False when Chrome already had
+    a session or no saved sessionid exists. TikTok remains responsible for adding
+    its CSRF/device cookies during the first navigation.
+    """
+    if _existing_session_cookie(context):
+        return False
+    session_id = load_session(profile)
+    if not session_id:
+        return False
+    context.add_cookies([{
+        "name": "sessionid",
+        "value": session_id,
+        "domain": ".tiktok.com",
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Lax",
+    }])
+    return True
+
+
 def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
-    """Require TikTok's normal interactive login in the persistent Chrome profile."""
     deadline = time.monotonic() + timeout_seconds
     login_reported = False
     last_navigation = 0.0
@@ -123,13 +155,16 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
             raise LoginError("TikTok penceresi kapatıldı")
         if file_input_ready(page):
             if status:
-                status("Normal Chrome oturumu hazır; upload ekranı açıldı")
+                status("Kalıcı Chrome profili doğrulandı; upload ekranı hazır")
             return
         url = page.url.lower()
         now = time.monotonic()
         if "/login" in url or _visible(page.locator('input[type="password"]')):
             if not login_reported and status:
-                status(f"{profile}: TikTok girişini Chrome içinde normal şekilde tamamlayın")
+                status(
+                    f"{profile}: kayıtlı Session ID geçersiz veya TikTok ek doğrulama istiyor; "
+                    "Chrome içinde normal girişi tamamlayın"
+                )
             login_reported = True
             page.bring_to_front()
             page.wait_for_timeout(750)
@@ -142,11 +177,11 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
             last_navigation = now
             continue
         page.wait_for_timeout(750)
-    raise LoginError("TikTok giriş/upload ekranı 15 dakikada hazır olmadı")
+    raise LoginError("TikTok session/giriş/upload ekranı 15 dakikada hazır olmadı")
 
 
 def _native_caption_write(field, caption: str) -> None:
-    """Use Playwright input actions only; never dispatch JavaScript DOM events."""
+    """Use Playwright input actions; never dispatch JavaScript DOM events."""
     field.scroll_into_view_if_needed(timeout=3000)
     field.click(timeout=3000)
     tag = str(field.evaluate("el => el.tagName.toLowerCase()"))
@@ -165,17 +200,22 @@ def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool
 
 
 def install(web_uploader: Any):
-    """Install automatic publishing with reduced, honest automation surface."""
     with _INSTALL_LOCK:
         if getattr(web_uploader, "_signaldesk_login_installed", False):
             preflight_hook.install(web_uploader)
             return
 
+        original_launch = web_uploader.launch_context
         original_prepare = web_uploader.prepare_upload
         original_confirm = web_uploader.confirm_publish_dialog
         original_notice = web_uploader.dismiss_pre_caption_notice
-        original_caption_write = web_uploader._write_caption
         web_uploader.file_input_ready = file_input_ready
+
+        def launch(playwright, profile):
+            context = original_launch(playwright, profile)
+            bootstrapped = bootstrap_session(context, profile)
+            setattr(context, "_signaldesk_session_bootstrapped", bootstrapped)
+            return context
 
         def confirm_for_every_profile(page):
             if handle_copyright_publish_dialog(page):
@@ -196,8 +236,6 @@ def install(web_uploader: Any):
             return result
 
         def prepare(request, publish=False, approval=None, status=None):
-            # The current app_tr workflow is sequential. Locking also prevents a
-            # future parallel call from exchanging profile-specific wrappers.
             with _INSTALL_LOCK:
                 original_wait = web_uploader.wait_for_upload_after_login
                 previous_confirm = web_uploader.confirm_publish_dialog
@@ -217,11 +255,10 @@ def install(web_uploader: Any):
                 web_uploader._write_caption = _native_caption_write
                 if status:
                     status(
-                        f"{request.profile}: normal Chrome oturumu kullanılıyor; "
+                        f"{request.profile}: kalıcı profil + gerektiğinde tek seferlik Session ID bootstrap; "
                         "GUI onayından sonra Yayınla otomatik tıklanacak"
                     )
                 try:
-                    # Preserve app_tr's required automatic final click and approval.
                     return original_prepare(
                         request, publish=publish, approval=approval, status=status
                     )
@@ -230,6 +267,7 @@ def install(web_uploader: Any):
                     web_uploader.confirm_publish_dialog = previous_confirm
                     web_uploader._write_caption = previous_writer
 
+        web_uploader.launch_context = launch
         web_uploader.confirm_publish_dialog = confirm_for_every_profile
         web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
         web_uploader._write_caption = _native_caption_write

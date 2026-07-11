@@ -1,26 +1,25 @@
-# Otomatik Yayınla ile düşürülmüş riskli web modu
+# Session ID bootstrap ve otomatik web yayını
 
-## Araştırma özeti
+## Araştırma sonucu
 
-Tam otomatik web yayınında sıfır tespit riski yoktur. Playwright Chrome'u CDP üzerinden yönetir ve bu kontrol kanalı teknik olarak gözlemlenebilir. Mevcut Chrome'a bağlanmak, uzantı kullanmak veya işletim sistemi seviyesinde tıklamak bunu güvenilir şekilde ortadan kaldırmaz; yalnız tespit yüzeyini başka yere taşır. Resmî, tam otomatik seçenek TikTok Content Posting API'dir, fakat denetlenmemiş API istemcilerinin gönderileri TikTok tarafından private görünürlüğe kısıtlanır.
+Session ID'yi her çalıştırmada zorla yeniden enjekte etmek, kalıcı Chrome profilinin TikTok tarafından oluşturulan daha geniş birinci taraf oturum durumunu sürekli ezme riski taşır. Daha dengeli yöntem, Session ID'yi yalnız boş profile giriş bootstrap'ı olarak kullanmak ve sonraki çalışmalarda Chrome profilinin kendi cookie/local storage/cache sürekliliğini korumaktır.
 
-## Seçilen denge
+## Yeni davranış
 
-İstenen işleyiş gereği son **Yayınla** tıklaması otomatik kalır. Risk şu şekilde azaltılır:
+1. Her hesap yine ayrı kalıcı Chrome profilinde açılır.
+2. Profilde geçerli `sessionid` veya `sessionid_ss` zaten varsa kayıtlı Session ID yeniden enjekte edilmez.
+3. Profil boşsa güvenli kasadaki Session ID bir kez `.tiktok.com` cookie'si olarak eklenir.
+4. İlk TikTok navigasyonu CSRF, cihaz ve diğer birinci taraf durumunu normal biçimde oluşturur.
+5. TikTok sessionı reddeder veya ek doğrulama isterse Chrome öne gelir ve kullanıcı normal girişi tamamlar.
+6. Video/caption hazırlanır, uygulamadaki açık onaydan sonra **Yayınla** otomatik tıklanır.
+7. Sonraki çalıştırma aynı kalıcı profil durumunu kullanır.
 
-- Session cookie Chrome'a enjekte edilmez.
-- Kullanıcı TikTok'a normal, görünür Chrome profilinde giriş yapar.
-- Stealth, fingerprint, WebDriver gizleme veya anti-bot bypass yaması kullanılmaz.
-- Caption yazımında `dispatchEvent(new InputEvent(...))` gibi açıkça sentetik JavaScript olayları kaldırılır.
-- Playwright'ın standart klavye ve tıklama aksiyonları kullanılır.
-- Uygulamadaki açık son onaydan sonra mevcut otomatik Publish tıklaması çalışır.
-- Hesaplar paralel değil sırayla işlenir; profil wrapperları her hesap sonunda geri yüklenir.
-- TikTok telif/içerik kontrolü tamamlanmamışsa yayın fail-closed durur.
+Caption yazımında JavaScript `dispatchEvent` kaldırılmıştır; standart Playwright klavye aksiyonları kullanılır. Stealth, fingerprint veya WebDriver gizleme yaması yoktur.
 
-## Neden uzantı veya OS tıklaması seçilmedi
+## Neden bu çözüm
 
-Chrome eklentisindeki `element.click()` olayı `isTrusted=false` üretir. Debugger tabanlı eklenti veya OS otomasyonu ise otomasyonu gizlemeye çalışır, kırılgandır ve hesap güvenliği riskini büyütür. Mevcut Chrome'a CDP ile bağlanmak da CDP tespit yüzeyini kaldırmaz.
+Playwright dokümantasyonu kimlik doğrulama durumunun saklanıp yeniden kullanılmasını destekler ve bu durumun hassas olduğunu açıkça belirtir. TikTok da session ID'nin tarayıcı/cihazla kurulan güvenlik durumunun parçası olduğunu söyler. Bu nedenle sürekli cookie transplantı yerine bir kez bootstrap + kalıcı profil sürekliliği daha az bozucudur.
 
-## Gerçekçi sınır
+## Sınır
 
-Bu sürüm önceki koda göre daha temiz ve daha az riskli bir otomasyon yüzeyi sağlar, ancak tespit edilmezlik veya izlenme garantisi vermez. Kesin düşük risk gerekiyorsa iki gerçek seçenek vardır: son tıklamayı kullanıcıya bırakmak veya TikTok denetiminden geçmiş resmî Content Posting API istemcisi kullanmak.
+Bu yöntem Session ID isteğini ve otomatik final tıklamayı korurken gereksiz yeniden enjeksiyonu kaldırır. Playwright/CDP hâlâ teknik olarak tespit edilebilir; izlenme veya tespit edilmeme garantisi verilemez.
