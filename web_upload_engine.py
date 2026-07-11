@@ -18,6 +18,7 @@ from typing import Callable, Iterable
 from platformdirs import user_data_dir
 from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as PlaywrightTimeout, sync_playwright
 
+import publication_guard
 from utils.antibot_resilience import InteractionConfig, human_typing_locator
 from utils.network_identity import apply_test_page_defaults
 
@@ -218,28 +219,47 @@ def wait_for_confirmation(confirm: threading.Event, cancelled: threading.Event, 
             raise WebUploadError("İşlem iptal edildi")
 
 
-def click_publish_and_verify(page: Page, button: Locator, status: Callable[[str], None]) -> None:
+def click_publish_and_verify(
+    page: Page,
+    profile_name: str,
+    status: Callable[[str], None],
+) -> None:
+    """Re-check the live page, publish once, and require post-publication evidence."""
+    publication_guard.assert_publishable(page, status)
+
+    button = publish_button(page)
+    if button is None:
+        raise WebUploadError("Yayın düğmesi onaydan sonra kayboldu; sayfa değişmiş olabilir")
+    try:
+        if not button.is_enabled():
+            raise WebUploadError("Yayın düğmesi onaydan sonra devre dışı kaldı")
+    except WebUploadError:
+        raise
+    except Exception as exc:
+        raise WebUploadError("Yayın düğmesinin güncel durumu doğrulanamadı") from exc
+
     status("Yayınla tıklanıyor")
     button.scroll_into_view_if_needed()
     button.click(timeout=10000)
-    success = re.compile(r"uploaded|published|scheduled|posted|yüklendi|yayınlandı|planlandı", re.I)
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        try:
-            if success.search(page.locator("body").inner_text(timeout=1500)):
-                status("TikTok yayını kabul etti")
-                return
-        except Exception:
-            pass
-        if "/upload" not in page.url.lower():
-            status("TikTok yayın ekranından ayrıldı, gönderim kabul edildi")
-            return
-        page.wait_for_timeout(1000)
-    raise WebUploadError("Yayınla tıklandı ancak başarı yanıtı doğrulanamadı; tarayıcıyı kontrol edin")
+
+    try:
+        publication_guard.wait_for_verified_publication(
+            page,
+            profile_name,
+            status=status,
+            timeout_seconds=180,
+        )
+    except RuntimeError as exc:
+        raise WebUploadError(str(exc)) from exc
 
 
-def run_upload(request: WebUploadRequest, confirm: threading.Event, cancelled: threading.Event,
-               status: Callable[[str], None], ready: Callable[[], None]) -> None:
+def run_upload(
+    request: WebUploadRequest,
+    confirm: threading.Event,
+    cancelled: threading.Event,
+    status: Callable[[str], None],
+    ready: Callable[[], None],
+) -> None:
     request.validate()
     with sync_playwright() as playwright:
         context = launch_context(playwright, request.profile_name)
@@ -253,11 +273,13 @@ def run_upload(request: WebUploadRequest, confirm: threading.Event, cancelled: t
             set_video(page, request.video)
             status("Caption dolduruluyor")
             fill_caption(page, request.caption, cancelled)
-            button = wait_ready(page, cancelled, status)
+            wait_ready(page, cancelled, status)
             page.bring_to_front()
             ready()
             wait_for_confirmation(confirm, cancelled, status)
-            click_publish_and_verify(page, button, status)
+            if cancelled.is_set():
+                raise WebUploadError("İşlem iptal edildi")
+            click_publish_and_verify(page, request.profile_name, status)
         except Exception as exc:
             folder = diagnostics(page, request.profile_name, exc)
             raise WebUploadError(f"{exc}\nTanı klasörü: {folder}") from exc
