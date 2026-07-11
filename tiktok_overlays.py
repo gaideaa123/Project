@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Handle TikTok onboarding while explicitly enabling automatic content checks."""
+"""Handle optional TikTok onboarding without disabling content checks."""
 
 import re
 import time
@@ -9,27 +9,35 @@ from collections.abc import Callable
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
 StatusCallback = Callable[[str], None]
-COOKIE_ALLOW = re.compile(r"^(tümüne izin ver|tüm çerezlere izin ver|çerezlere izin ver|allow all|allow all cookies|accept all|accept all cookies)$", re.I)
+COOKIE_ALLOW = re.compile(
+ r"^(tümüne izin ver|tüm çerezlere izin ver|çerezlere izin ver|"
+ r"allow all|allow all cookies|accept all|accept all cookies)$", re.I,
+)
 CONTENT_CHECK_TEXT = re.compile(
- r"otomatik içerik kontrolleri açılsın mı|müzik telif hakkı kontrolü|"
- r"içerik kontrolü\s*\(hafif\)|içerik kontrol|içeriği kontrol|"
- r"telif hakkı kontrol|automatic content checks|content check|copyright check",
+ r"içerik kontrol|içeriği kontrol|telif hakkı kontrol|otomatik içerik kontrol|"
+ r"sessize alınmasına neden olabilecek|content check|copyright check|muted",
  re.I,
 )
-ENABLE_CONTENT_CHECK = re.compile(r"^(aç|etkinleştir|kontrolü aç|içerik kontrolünü aç|turn on|enable|enable check|turn on content check)$", re.I)
+ENABLE_CONTENT_CHECK = re.compile(
+ r"^(aç|etkinleştir|kontrolü aç|içerik kontrolünü aç|"
+ r"turn on|enable|enable check|turn on content check)$", re.I,
+)
 GOT_IT = re.compile(r"^(anladım|tamam|got it|understood|i understand)$", re.I)
-PUBLISH_TEXT = re.compile(r"paylaşmaya devam|publish anyway|share now|post now|hemen paylaş|hemen yayınla|yayınlamaya devam", re.I)
+PUBLISH_TEXT = re.compile(
+ r"paylaşmaya devam|publish anyway|share now|post now|hemen paylaş|"
+ r"hemen yayınla|yayınlamaya devam", re.I,
+)
 CONTAINER_SELECTORS = (
  '[role="dialog"]', '[aria-modal="true"]', '[role="alertdialog"]',
- '[data-e2e*="modal" i]', '[class*="modal" i]', '[class*="dialog" i]',
- '[class*="popup" i]', '[class*="drawer" i]', '[class*="banner" i]',
- '[class*="cookie" i]',
+ '.TUXModal-overlay', '[data-floating-ui-portal]', '[class*="modal" i]',
+ '[class*="dialog" i]', '[class*="banner" i]', '[class*="cookie" i]',
 )
-CLICKABLE_SELECTOR = "button, [role='button'], [tabindex='0']"
+
 
 def _notify(status: StatusCallback | None, message: str) -> None:
  if status:
   status(message)
+
 
 def _visible(locator, timeout: int = 250) -> bool:
  try:
@@ -37,18 +45,29 @@ def _visible(locator, timeout: int = 250) -> bool:
  except (PlaywrightTimeout, PlaywrightError):
   return False
 
-def _label(locator) -> str:
- try:
-  return re.sub(r"\s+", " ", locator.get_attribute("aria-label") or locator.inner_text(timeout=500) or "").strip()
- except (PlaywrightTimeout, PlaywrightError):
-  return ""
 
-def _containers(surface):
+def _safe_click(locator) -> bool:
+ try:
+  locator.scroll_into_view_if_needed(timeout=1500)
+ except (AttributeError, PlaywrightTimeout, PlaywrightError):
+  pass
+ try:
+  locator.click(timeout=4000)
+  return True
+ except (PlaywrightTimeout, PlaywrightError):
+  try:
+   locator.click(timeout=4000, force=True)
+   return True
+  except (PlaywrightTimeout, PlaywrightError):
+   return False
+
+
+def _containers(page):
  seen: set[str] = set()
  for selector in CONTAINER_SELECTORS:
-  locators = surface.locator(selector)
+  locators = page.locator(selector)
   try:
-   count = min(locators.count(), 40)
+   count = min(locators.count(), 30)
   except PlaywrightError:
    count = 0
   for index in range(count):
@@ -56,155 +75,151 @@ def _containers(surface):
    try:
     if not container.is_visible(timeout=150):
      continue
-    text = re.sub(r"\s+", " ", container.inner_text(timeout=900)).strip()
-    key = f"{selector}:{text[:240]}"
+    text = re.sub(r"\s+", " ", container.inner_text(timeout=700)).strip()
+    key = f"{selector}:{text[:180]}"
     if key not in seen:
      seen.add(key)
      yield container, text
    except (PlaywrightTimeout, PlaywrightError):
     continue
 
-def _reliable_click(target, page) -> bool:
- try:
-  target.scroll_into_view_if_needed(timeout=3000)
- except (AttributeError, PlaywrightError):
-  pass
- try:
-  target.click(timeout=4000)
- except PlaywrightError:
-  try:
-   target.click(timeout=4000, force=True)
-  except PlaywrightError:
-   try:
-    box = target.bounding_box(timeout=1500)
-    if not box:
-     return False
-    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-   except (AttributeError, PlaywrightError):
-    return False
- page.wait_for_timeout(250)
- return True
 
-def _click_exact(container, pattern: re.Pattern[str], page) -> bool:
+def _click_exact(container, pattern: re.Pattern[str]) -> bool:
  button = container.get_by_role("button", name=pattern)
- if _visible(button, 350) and _reliable_click(button.first, page):
+ if _visible(button, 300) and _safe_click(button.first):
   return True
  text = container.get_by_text(pattern, exact=True)
- if _visible(text, 350):
+ if _visible(text, 300):
   target = text.first
+  if _safe_click(target):
+   return True
   try:
-   ancestor = target.locator("xpath=ancestor::*[self::button or @role='button'][1]")
-   if _visible(ancestor, 200):
-    target = ancestor.first
+   parent = target.locator("xpath=ancestor::*[self::button or @role='button'][1]")
+   if _safe_click(parent):
+    return True
   except PlaywrightError:
    pass
-  if _reliable_click(target, page):
-   return True
- candidates = container.locator(CLICKABLE_SELECTOR)
+ candidates = container.locator("button, [role='button']")
  try:
-  count = min(candidates.count(), 50)
+  count = min(candidates.count(), 30)
  except PlaywrightError:
   count = 0
  for index in range(count):
   candidate = candidates.nth(index)
-  if pattern.fullmatch(_label(candidate)) and _visible(candidate, 200):
-   if _reliable_click(candidate, page):
+  try:
+   label = re.sub(
+    r"\s+", " ", candidate.get_attribute("aria-label")
+    or candidate.inner_text(timeout=400) or "",
+   ).strip()
+   if pattern.fullmatch(label) and candidate.is_visible(timeout=200) and _safe_click(candidate):
     return True
+  except (PlaywrightTimeout, PlaywrightError):
+   continue
  return False
 
-def _inside_content_check(candidate) -> bool:
- """Verify a global Aç candidate belongs to the content-check onboarding tree."""
+
+def _candidate_belongs_to_content_check(candidate) -> bool:
+ """Verify a global Aç candidate belongs to a content-check modal/portal."""
  try:
-  return bool(candidate.evaluate(
-   """element => {
-     let node = element;
-     for (let depth = 0; node && depth < 12; depth++, node = node.parentElement) {
-       const text = (node.innerText || '').replace(/\\s+/g, ' ').toLowerCase();
-       if (text.includes('otomatik içerik kontrolleri') ||
-           text.includes('müzik telif hakkı kontrolü') ||
-           text.includes('içerik kontrolü (hafif)') ||
-           text.includes('automatic content check') ||
-           text.includes('copyright check')) return true;
-     }
-     return false;
-   }"""
-  ))
+  return bool(candidate.evaluate("""el => {
+   const root = el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .TUXModal-overlay, [data-floating-ui-portal]');
+   if (!root) return false;
+   const text = (root.innerText || root.textContent || '').toLowerCase();
+   return /içerik kontrol|içeriği kontrol|telif hakkı kontrol|sessize alınmasına neden olabilecek|content check|copyright check|muted/.test(text)
+     && !/hemen paylaş|paylaşmaya devam|publish anyway|share now|post now/.test(text);
+  }"""))
  except (AttributeError, PlaywrightError):
   return False
 
-def _click_global_verified_enable(surface, page) -> bool:
- candidates = surface.locator(CLICKABLE_SELECTOR)
+
+def _click_global_verified_enable(page, scope=None) -> bool:
+ """Fallback for TikTok floating portals that sit outside normal modal trees."""
+ root = scope or page
  try:
-  count = min(candidates.count(), 120)
- except PlaywrightError:
-  count = 0
+  candidates = root.locator("button, [role='button']")
+  count = min(candidates.count(), 80)
+ except (AttributeError, PlaywrightError):
+  return False
  for index in range(count):
   candidate = candidates.nth(index)
-  if not ENABLE_CONTENT_CHECK.fullmatch(_label(candidate)):
+  try:
+   label = re.sub(
+    r"\s+", " ", candidate.get_attribute("aria-label")
+    or candidate.inner_text(timeout=400) or "",
+   ).strip()
+   if not ENABLE_CONTENT_CHECK.fullmatch(label):
+    continue
+   if not candidate.is_visible(timeout=200) or not _candidate_belongs_to_content_check(candidate):
+    continue
+   if _safe_click(candidate):
+    return True
+  except (PlaywrightTimeout, PlaywrightError):
    continue
-  if not _visible(candidate, 250) or not _inside_content_check(candidate):
-   continue
-  if _reliable_click(candidate, page):
-   return True
  return False
 
-def _surfaces(page):
- yield page
- try:
-  for frame in page.frames:
-   if frame is not page.main_frame:
-    yield frame
- except (AttributeError, PlaywrightError):
-  return
 
 def _click_cookie(page, status=None) -> bool:
- for surface in _surfaces(page):
-  for container, text in _containers(surface):
-   if PUBLISH_TEXT.search(text):
-    continue
-   if _click_exact(container, COOKIE_ALLOW, page):
-    _notify(status, "Çerez izni kabul edildi")
-    return True
-  global_button = surface.get_by_role("button", name=COOKIE_ALLOW)
-  if _visible(global_button, 250) and _reliable_click(global_button.first, page):
+ for container, text in _containers(page):
+  if PUBLISH_TEXT.search(text):
+   continue
+  if _click_exact(container, COOKIE_ALLOW):
    _notify(status, "Çerez izni kabul edildi")
+   page.wait_for_timeout(300)
    return True
+ global_button = page.get_by_role("button", name=COOKIE_ALLOW)
+ if _visible(global_button, 250) and _safe_click(global_button.first):
+  _notify(status, "Çerez izni kabul edildi")
+  page.wait_for_timeout(300)
+  return True
  return False
+
 
 def _enable_content_check(page, status=None) -> bool:
- for surface in _surfaces(page):
-  for container, text in _containers(surface):
-   if PUBLISH_TEXT.search(text) or not CONTENT_CHECK_TEXT.search(text):
-    continue
-   if _click_exact(container, ENABLE_CONTENT_CHECK, page):
-    _notify(status, "Otomatik içerik kontrolleri Aç ile etkinleştirildi")
-    return True
-  if _click_global_verified_enable(surface, page):
-   _notify(status, "Otomatik içerik kontrolleri Aç ile etkinleştirildi")
+ """Click Aç only inside a verified content-check onboarding container."""
+ for container, text in _containers(page):
+  if PUBLISH_TEXT.search(text) or not CONTENT_CHECK_TEXT.search(text):
+   continue
+  if _click_exact(container, ENABLE_CONTENT_CHECK):
+   _notify(status, "İçerik kontrolü Aç ile etkinleştirildi")
+   page.wait_for_timeout(400)
+   return True
+ if _click_global_verified_enable(page, page):
+  _notify(status, "İçerik kontrolü Aç ile etkinleştirildi")
+  page.wait_for_timeout(400)
+  return True
+ return False
+
+
+def _click_got_it(page, status=None) -> bool:
+ for container, text in _containers(page):
+  if PUBLISH_TEXT.search(text):
+   continue
+  if _click_exact(container, GOT_IT):
+   _notify(status, "TikTok bilgilendirmesi Anladım ile kapatıldı")
+   page.wait_for_timeout(300)
    return True
  return False
 
-def _click_got_it(page, status=None) -> bool:
- for surface in _surfaces(page):
-  for container, text in _containers(surface):
-   if PUBLISH_TEXT.search(text):
-    continue
-   if _click_exact(container, GOT_IT, page):
-    _notify(status, "TikTok bilgilendirmesi Anladım ile kapatıldı")
-    return True
- return False
 
-def clear_new_account_overlays(page, status: StatusCallback | None = None, timeout_seconds: float = 25.0, quiet_seconds: float = 2.0, minimum_scan_seconds: float = 4.0) -> int:
- """Clear cookie, click verified Aç, then close Anladım layers."""
- started = time.monotonic(); deadline = started + timeout_seconds; clicks = 0; quiet_since = started
+def clear_new_account_overlays(
+ page,
+ status: StatusCallback | None = None,
+ timeout_seconds: float = 20.0,
+ quiet_seconds: float = 1.5,
+) -> int:
+ """Clear cookie -> content check Aç -> every Anladım, including floating portals."""
+ deadline = time.monotonic() + timeout_seconds
+ clicks = 0
+ quiet_since = time.monotonic()
  while time.monotonic() < deadline:
   if page.is_closed():
    return clicks
   clicked = _click_cookie(page, status) or _enable_content_check(page, status) or _click_got_it(page, status)
   if clicked:
-   clicks += 1; quiet_since = time.monotonic(); continue
-  now = time.monotonic()
-  if now - started >= minimum_scan_seconds and now - quiet_since >= quiet_seconds:
+   clicks += 1
+   quiet_since = time.monotonic()
+   continue
+  if time.monotonic() - quiet_since >= quiet_seconds:
    return clicks
   page.wait_for_timeout(150)
  return clicks
