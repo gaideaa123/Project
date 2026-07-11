@@ -41,6 +41,7 @@ jobs:
       python proxy_health_false_negative_test.py
       python proxy_web_inheritance_test.py
       python socks5_proxy_test.py
+      python socks5_health_bridge_test.py
    - name: App TR layout startup smoke
      run: python layout_compat_smoke.py
    - name: Feature contract
