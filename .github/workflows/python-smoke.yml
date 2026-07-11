@@ -21,3 +21,5 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python smoke_test.py
       - run: python preflight_smoke.py
+      - run: python -m py_compile media_qa.py media_qa_smoke.py
+      - run: python media_qa_smoke.py
