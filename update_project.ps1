@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $repo = "https://raw.githubusercontent.com/gaideaa123/Project/main"
 $files = @(
- ".github/workflows/python-smoke.yml", ".gitignore", "requirements.txt",
+ ".github/workflows/python-smoke.yml", ".gitignore", "requirements.txt", "update_project.ps1",
  "app.py", "app_tr.py", "run_tr.py", "run_one_click.py", "one_click_tr.py",
  "oauth_helper.py", "web_uploader.py", "web_upload_engine.py", "web_gui_integration.py",
  "tiktok_login.py", "tiktok_overlays.py", "copyright_dialog.py", "copyright_policy.py",
@@ -13,8 +13,8 @@ $files = @(
  "smoke_test.py", "preflight_smoke.py", "media_qa_smoke.py", "antibot_resilience_smoke.py",
  "antibot_sandbox_smoke.py", "runtime_contract_smoke.py", "feature_presence_contract_test.py",
  "publish_flow_contract_test.py", "proxy_web_inheritance_test.py", "socks5_proxy_test.py",
- "socks5_health_bridge_test.py", "README.md", "TURKCE_KURULUM.md", "WEB_GUI_KURULUM.md",
- "WEB_YUKLEME_KURULUM.md"
+ "socks5_health_bridge_test.py", "updater_contract_test.py", "README.md", "TURKCE_KURULUM.md",
+ "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
 )
 
 $stage = Join-Path $env:TEMP ("signaldesk-update-" + [guid]::NewGuid().ToString("N"))
