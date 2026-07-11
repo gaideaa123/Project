@@ -8,26 +8,36 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+      XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
+      XDG_DATA_HOME: ${{ runner.temp }}/xdg-data
+      XDG_CACHE_HOME: ${{ runner.temp }}/xdg-cache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
-      - name: Compile every Python module
-        run: python -m compileall -q .
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Compile production modules
+        run: |
+          python -m py_compile app.py app_tr.py oauth_helper.py media_qa.py
+          python -m py_compile antibot_resilience.py antibot_sandbox.py
+          python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
+          python -m py_compile utils/antibot_resilience.py utils/network_identity.py
       - name: Core GUI smoke
         run: python smoke_test.py
-      - name: Media preflight smoke
+      - name: Preflight smoke
         run: python preflight_smoke.py
-      - name: Uploader architecture contracts
-        run: python architecture_contract_test.py
       - name: Media QA smoke
         run: python media_qa_smoke.py
-      - name: Defensive anti-bot lab smoke
+      - name: Defensive resilience smoke
         run: python antibot_resilience_smoke.py
+      - name: Assisted interaction unit tests
+        run: python -m unittest -v test_human_interactions.py

@@ -1,7 +1,7 @@
-"""Playwright interaction helpers for UI testing.
+"""Playwright interaction helpers for visible, user-authorized UI flows.
 
-These helpers add realistic timing and curved pointer motion to tests. They do not
-hide automation signals or bypass a site's access controls.
+The helpers improve timing and pointer reliability. They do not hide automation
+signals, spoof fingerprints, bypass CAPTCHA, or defeat platform controls.
 """
 
 from __future__ import annotations
@@ -48,8 +48,6 @@ class InteractionConfig:
 
 @dataclass
 class PointerState:
-    """Tracks the last known pointer position between calls."""
-
     x: float = 0.0
     y: float = 0.0
 
@@ -63,28 +61,25 @@ def _randint(rng: random.Random, low: int, high: int) -> int:
     return low if low == high else rng.randint(low, high)
 
 
-def human_typing(
+def human_typing_locator(
     page: Any,
-    selector: str,
+    locator: Any,
     text: str,
     *,
+    replace: bool = True,
     config: Optional[InteractionConfig] = None,
     rng: Optional[random.Random] = None,
 ) -> None:
-    """Focus a locator and enter text with per-character timing variance.
-
-    ``keyboard.press(char)`` is intentionally avoided: it treats characters as
-    key names and breaks on uppercase, punctuation, Unicode, and spaces.
-    """
+    """Focus a resolved locator and enter Unicode text with bounded delays."""
 
     if not isinstance(text, str):
         raise TypeError("text must be a string")
-
     cfg = config or InteractionConfig()
     random_source = rng or random.Random()
-    locator = page.locator(selector)
     locator.wait_for(state="visible", timeout=cfg.timeout_ms)
     locator.click(timeout=cfg.timeout_ms)
+    if replace:
+        page.keyboard.press("Control+A")
 
     for char in text:
         if char == "\n":
@@ -93,10 +88,26 @@ def human_typing(
             page.keyboard.press("Tab")
         else:
             page.keyboard.insert_text(char)
-
         _wait(page, _randint(random_source, cfg.min_key_delay_ms, cfg.max_key_delay_ms))
         if random_source.random() < cfg.pause_probability:
             _wait(page, _randint(random_source, cfg.min_pause_ms, cfg.max_pause_ms))
+
+
+def human_typing(
+    page: Any,
+    selector: str,
+    text: str,
+    *,
+    config: Optional[InteractionConfig] = None,
+    rng: Optional[random.Random] = None,
+) -> None:
+    human_typing_locator(
+        page,
+        page.locator(selector),
+        text,
+        config=config,
+        rng=rng,
+    )
 
 
 def human_mouse_move_and_click(
@@ -107,7 +118,7 @@ def human_mouse_move_and_click(
     config: Optional[InteractionConfig] = None,
     rng: Optional[random.Random] = None,
 ) -> PointerState:
-    """Move along a quadratic Bezier curve and click inside a visible locator."""
+    """Move along a quadratic Bezier curve and click a visible locator."""
 
     cfg = config or InteractionConfig()
     random_source = rng or random.Random()
@@ -115,7 +126,6 @@ def human_mouse_move_and_click(
     locator = page.locator(selector)
     locator.wait_for(state="visible", timeout=cfg.timeout_ms)
     box = locator.bounding_box(timeout=cfg.timeout_ms)
-
     if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
         locator.click(timeout=cfg.timeout_ms)
         return state
@@ -123,7 +133,6 @@ def human_mouse_move_and_click(
     target_x = float(box["x"]) + float(box["width"]) * random_source.uniform(0.2, 0.8)
     target_y = float(box["y"]) + float(box["height"]) * random_source.uniform(0.2, 0.8)
     start_x, start_y = state.x, state.y
-
     distance = math.hypot(target_x - start_x, target_y - start_y)
     bend = min(max(distance * 0.18, 12.0), 120.0)
     control_x = (start_x + target_x) / 2 + random_source.uniform(-bend, bend)
@@ -143,6 +152,5 @@ def human_mouse_move_and_click(
         _wait(page, _randint(random_source, cfg.min_hold_ms, cfg.max_hold_ms))
     finally:
         page.mouse.up()
-
     state.x, state.y = target_x, target_y
     return state
