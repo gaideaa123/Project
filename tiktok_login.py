@@ -10,7 +10,6 @@ import keyring
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
 import copyright_dialog
-import copyright_policy
 import preflight_hook
 import tiktok_overlays
 
@@ -161,13 +160,10 @@ def install(web_uploader: Any):
             }])
         return context
 
-    def first_profile_confirm(page):
+    def confirm_for_every_profile(page):
         if handle_copyright_publish_dialog(page):
             return
         original_confirm(page)
-
-    def no_copyright_confirm(page):
-        return None
 
     def dismiss_pre_caption_notice(
         page, status=None, timeout_seconds=45, optional_after_seconds=8
@@ -187,21 +183,21 @@ def install(web_uploader: Any):
     def prepare(request, publish=False, approval=None, status=None):
         original_wait = web_uploader.wait_for_upload_after_login
         previous_confirm = web_uploader.confirm_publish_dialog
-        is_first = copyright_policy.is_first_profile_video(request.video)
 
         def waiter(page, timeout_seconds=900, status=None):
             result = wait_for_upload_after_login(
                 page, timeout_seconds, status, request.profile
             )
+            # New account: cookie -> content check Aç -> all Anladım.
             tiktok_overlays.clear_new_account_overlays(
                 page, status=status, timeout_seconds=20, quiet_seconds=1.5
             )
             return result
 
         web_uploader.wait_for_upload_after_login = waiter
-        web_uploader.confirm_publish_dialog = (
-            first_profile_confirm if is_first else no_copyright_confirm
-        )
+        web_uploader.confirm_publish_dialog = confirm_for_every_profile
+        if status:
+            status(f"{request.profile}: içerik kontrolü açık, telif onayı etkin")
         try:
             return original_prepare(
                 request, publish=publish, approval=approval, status=status
@@ -211,7 +207,7 @@ def install(web_uploader: Any):
             web_uploader.confirm_publish_dialog = previous_confirm
 
     web_uploader.launch_context = launch
-    web_uploader.confirm_publish_dialog = first_profile_confirm
+    web_uploader.confirm_publish_dialog = confirm_for_every_profile
     web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
     web_uploader.prepare_upload = prepare
     web_uploader._signaldesk_login_installed = True
