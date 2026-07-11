@@ -37,6 +37,8 @@ class HookTests(unittest.TestCase):
         self.assertIn("__sandboxCdpProbe", script)
         self.assertIn("HTMLCanvasElement.prototype, 'toDataURL'", script)
         self.assertIn("WebGLRenderingContext", script)
+        self.assertRegex(script, r"\}\)\(\d+\);\s*$")
+        self.assertNotIn("__SEED__", script)
 
     def test_seed_is_reproducible(self):
         self.assertEqual(

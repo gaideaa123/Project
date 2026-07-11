@@ -64,8 +64,8 @@ class SandboxConfig:
 # target. The deterministic seed makes classroom observations reproducible.
 def build_synthetic_init_script(seed: str) -> str:
     seed_number = int.from_bytes(hashlib.sha256(seed.encode("utf-8")).digest()[:4], "big")
-    return r"""
-(seed) => {
+    body = r"""
+((seed) => {
   'use strict';
   const marker = Object.freeze({purpose: 'authorized-local-sandbox', seed});
   Object.defineProperty(window, '__ANTI_BOT_SANDBOX__', {value: marker});
@@ -78,15 +78,20 @@ def build_synthetic_init_script(seed: str) -> str:
     enumerable: true,
     get: () => false
   });
-  if (!window.chrome) {
+  const chromeMock = Object.freeze({
+    app: Object.freeze({isInstalled: false}),
+    runtime: Object.freeze({id: undefined}),
+    sandboxMarker: true
+  });
+  try {
     Object.defineProperty(window, 'chrome', {
       configurable: true,
-      value: Object.freeze({
-        app: Object.freeze({isInstalled: false}),
-        runtime: Object.freeze({id: undefined}),
-        sandboxMarker: true
-      })
+      value: chromeMock
     });
+  } catch (_error) {
+    // A browser may expose a non-configurable object. Keep the lab explicit
+    // rather than weakening the descriptor with additional concealment tricks.
+    window.__ANTI_BOT_SANDBOX_CHROME_MOCK_FAILED__ = true;
   }
 
   // CDP/runtime leak fixture. Calling this function deterministically exercises
@@ -147,8 +152,9 @@ def build_synthetic_init_script(seed: str) -> str:
   };
   patchWebGL(window.WebGLRenderingContext?.prototype);
   patchWebGL(window.WebGL2RenderingContext?.prototype);
-}
-""" + f"\n// deterministic-seed: {seed_number}\n"
+})(__SEED__);
+"""
+    return body.replace("__SEED__", str(seed_number))
 
 
 class _TrainingHandler(BaseHTTPRequestHandler):
