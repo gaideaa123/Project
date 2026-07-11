@@ -7,23 +7,24 @@ os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
 
 
 def main() -> None:
-    import sitecustomize
-    from PySide6.QtWidgets import QApplication, QGridLayout, QHBoxLayout, QWidget
+    from PySide6.QtWidgets import QApplication, QGridLayout
 
-    app = QApplication.instance() or QApplication([])
-    host = QWidget()
-    grid = QGridLayout(host)
-    grid.insertLayout(0, QHBoxLayout())
-    assert grid.count() == 1, "QGridLayout uyumluluk satırı eklenemedi"
+    # sitecustomize may be unavailable in zip downloads or some Windows venvs.
+    # Remove its optional patch so this test proves app_tr's guaranteed import
+    # path installs compatibility by itself.
+    if hasattr(QGridLayout, "insertLayout"):
+        delattr(QGridLayout, "insertLayout")
 
     import app_tr
 
+    assert hasattr(QGridLayout, "insertLayout"), "Doğrudan grid uyumluluğu kurulmadı"
+    app = QApplication.instance() or QApplication([])
     window = app_tr.TurkceAnaPencere()
     assert hasattr(window, "output_dir"), "Türkçe pencere çıktı alanı olmadan açıldı"
     assert hasattr(window, "network_identity_page"), "Proxy sekmesi oluşturulmadı"
     window.close()
     app.processEvents()
-    print("APP_TR LAYOUT UYUMLULUK TESTİ GEÇTİ")
+    print("APP_TR DOĞRUDAN BAŞLANGIÇ TESTİ GEÇTİ")
 
 
 if __name__ == "__main__":
