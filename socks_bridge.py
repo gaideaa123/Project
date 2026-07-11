@@ -112,6 +112,8 @@ class AuthenticatedSocksBridge:
   self.identity.validate()
   if urlparse(self.identity.server).scheme.casefold() != "socks5":
    raise SocksBridgeError("Bridge yalnız SOCKS5 için kullanılabilir")
+  self._closed = False
+  self._close_lock = threading.Lock()
   bridge = self
 
   class Handler(socketserver.BaseRequestHandler):
@@ -153,6 +155,10 @@ class AuthenticatedSocksBridge:
   return self
 
  def close(self) -> None:
+  with self._close_lock:
+   if self._closed:
+    return
+   self._closed = True
   self._server.shutdown()
   self._server.server_close()
   if self._thread.is_alive() and self._thread is not threading.current_thread():

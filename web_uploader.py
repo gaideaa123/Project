@@ -156,7 +156,7 @@ def launch_context(playwright: Playwright, profile: str) -> BrowserContext:
    options = dict(base); options["proxy"] = bridge.proxy
    context = _launch(playwright, options)
    proxy_health.verify_browser_target(context, identity, UPLOAD_URL)
-   context.on("close", lambda: bridge.close())
+   context.on("close", lambda *_: bridge.close())
    return context
   except Exception as exc:
    _close_context(context); bridge.close()

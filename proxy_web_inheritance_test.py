@@ -17,15 +17,24 @@ def main() -> None:
  playwright.chromium.launch_persistent_context.side_effect = [bad_context, good_context]
  with patch.object(web_uploader.network_identity, "load", return_value=identity), patch.object(
   web_uploader.proxy_health, "verify_browser_target", side_effect=[RuntimeError("ERR_TUNNEL_CONNECTION_FAILED"), Mock()]
- ) as verify:
+ ):
   result = web_uploader.launch_context(playwright, "Profil A")
   assert result is good_context
-  assert verify.call_count == 2
   bad_context.close.assert_called_once()
-  first = playwright.chromium.launch_persistent_context.call_args_list[0].kwargs["proxy"]
-  second = playwright.chromium.launch_persistent_context.call_args_list[1].kwargs["proxy"]
-  assert first["server"].startswith("https://")
-  assert second["server"].startswith("http://")
+
+ socks = network_identity.NetworkIdentity("socks5://proxy.example:443", "user", "pass")
+ bridge = Mock(); bridge.proxy = {"server": "http://127.0.0.1:32123"}
+ bridge.start.return_value = bridge
+ playwright = Mock(); socks_context = Mock(); playwright.chromium.launch_persistent_context.return_value = socks_context
+ with patch.object(web_uploader.network_identity, "load", return_value=socks), patch.object(
+  web_uploader.socks_bridge, "AuthenticatedSocksBridge", return_value=bridge
+ ), patch.object(web_uploader.proxy_health, "verify_browser_target"):
+  result = web_uploader.launch_context(playwright, "Profil SOCKS")
+  assert result is socks_context
+  options = playwright.chromium.launch_persistent_context.call_args.kwargs
+  assert options["proxy"] == bridge.proxy
+  assert "username" not in options["proxy"]
+  socks_context.on.assert_called_once()
 
  direct = network_identity.NetworkIdentity()
  with patch.object(web_uploader.network_identity, "load", return_value=direct):
@@ -38,7 +47,7 @@ def main() -> None:
  with patch.object(proxy_health, "verify_browser_context", return_value=healthy):
   assert proxy_health.verify_browser_target(context, identity, web_uploader.UPLOAD_URL) is healthy
 
- print("OK: TikTok tüneli hedef bazlı doğrulanıyor ve HTTPS proxy için güvenli CONNECT fallback çalışıyor")
+ print("OK: HTTP, HTTPS ve kimlik doğrulamalı SOCKS5 tarayıcı yolları doğrulandı")
 
 
 if __name__ == "__main__":
