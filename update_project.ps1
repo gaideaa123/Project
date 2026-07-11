@@ -14,7 +14,7 @@ $files = @(
  "antibot_sandbox_smoke.py", "runtime_contract_smoke.py", "feature_presence_contract_test.py",
  "publish_flow_contract_test.py", "proxy_web_inheritance_test.py", "socks5_proxy_test.py",
  "socks5_health_bridge_test.py", "guide_proxy_assignment_test.py", "direct_connection_policy_test.py", "target_reachability_test.py",
- "session_publish_unit_tests.py", "updater_contract_test.py", "README.md", "TURKCE_KURULUM.md", "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
+ "session_publish_unit_tests.py", "content_check_overlay_test.py", "updater_contract_test.py", "README.md", "TURKCE_KURULUM.md", "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
 )
 $stage = Join-Path $env:TEMP ("signaldesk-update-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $stage | Out-Null
@@ -43,6 +43,8 @@ try {
  $env:QT_QPA_PLATFORM = "offscreen"
  & $python -m unittest -v (Join-Path $PSScriptRoot "session_publish_unit_tests.py")
  if ($LASTEXITCODE -ne 0) { throw "Session ID bootstrap testi basarisiz" }
+ & $python (Join-Path $PSScriptRoot "content_check_overlay_test.py")
+ if ($LASTEXITCODE -ne 0) { throw "Icerik kontrolu Ac testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "socks5_proxy_test.py")
  if ($LASTEXITCODE -ne 0) { throw "SOCKS5 bridge testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "socks5_health_bridge_test.py")
