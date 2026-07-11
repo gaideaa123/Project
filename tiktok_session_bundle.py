@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Parse and persist the minimal TikTok authentication cookie bundle."""
+"""Parse TikTok authentication input without inventing cookie aliases."""
 
 import json
 import re
@@ -25,7 +25,7 @@ def _pairs(raw: str) -> dict[str, str]:
 
 
 def parse(raw: str) -> dict[str, str]:
-    """Accept a raw session value, Cookie header, or exported JSON cookie list."""
+    """Accept raw sessionid, Cookie header, or exported JSON cookies."""
     value = raw.strip()
     if not value:
         raise ValueError("Session bilgisi boş")
@@ -48,12 +48,14 @@ def parse(raw: str) -> dict[str, str]:
     if not rows:
         if re.search(r"\s", value) or len(value) < 16:
             raise ValueError("Geçerli sessionid veya TikTok Cookie başlığı girin")
-        rows = {"sessionid": value, "sessionid_ss": value}
+        # Critical: a raw sessionid is only sessionid. Never fabricate
+        # sessionid_ss with the same value; TikTok may reject that conflict.
+        rows = {"sessionid": value}
     primary = rows.get("sessionid") or rows.get("sessionid_ss")
     if not primary or len(primary) < 16 or re.search(r"\s", primary):
         raise ValueError("Cookie paketinde geçerli sessionid/sessionid_ss yok")
-    rows.setdefault("sessionid", primary)
-    rows.setdefault("sessionid_ss", primary)
+    if "sessionid" not in rows:
+        rows["sessionid"] = primary
     return rows
 
 
@@ -68,7 +70,16 @@ def loads(raw: str) -> dict[str, str]:
     try:
         payload = json.loads(raw)
         if isinstance(payload, dict):
-            return {name: str(value) for name, value in payload.items() if name in AUTH_COOKIE_NAMES and value}
+            rows = {
+                name: str(value) for name, value in payload.items()
+                if name in AUTH_COOKIE_NAMES and value
+            }
+            # Migrate the previous buggy format which copied raw sessionid into
+            # sessionid_ss. Keep a genuinely distinct alias supplied by user.
+            if (set(rows) <= {"sessionid", "sessionid_ss"}
+                    and rows.get("sessionid_ss") == rows.get("sessionid")):
+                rows.pop("sessionid_ss", None)
+            return rows
     except (ValueError, TypeError, json.JSONDecodeError):
         pass
     return parse(raw)
