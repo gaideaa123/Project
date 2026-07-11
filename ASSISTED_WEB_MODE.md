@@ -1,17 +1,26 @@
-# Düşük riskli yardımlı web yayın modu
+# Otomatik Yayınla ile düşürülmüş riskli web modu
 
-Web üzerinden TikTok yüklemek resmî bir kullanıcı özelliğidir. Risk, web sayfasından değil tarayıcının otomasyonla yönetilmesi, session cookie enjeksiyonu ve son yayın tıklamasının sentetik yapılmasından gelir.
+## Araştırma özeti
 
-Bu mod riski gizleme veya anti-bot sistemini atlatma yoluyla değil, otomasyonu kritik adımlardan çıkararak azaltır:
+Tam otomatik web yayınında sıfır tespit riski yoktur. Playwright Chrome'u CDP üzerinden yönetir ve bu kontrol kanalı teknik olarak gözlemlenebilir. Mevcut Chrome'a bağlanmak, uzantı kullanmak veya işletim sistemi seviyesinde tıklamak bunu güvenilir şekilde ortadan kaldırmaz; yalnız tespit yüzeyini başka yere taşır. Resmî, tam otomatik seçenek TikTok Content Posting API'dir, fakat denetlenmemiş API istemcilerinin gönderileri TikTok tarafından private görünürlüğe kısıtlanır.
 
-- Session ID Chrome'a enjekte edilmez.
-- Stealth, fingerprint veya `navigator.webdriver` yaması kullanılmaz.
-- Kullanıcı normal Chrome profilinde gerekirse giriş yapar.
-- Uygulama video ve caption alanlarını hazırlar.
-- Kullanıcı görünürlük, içerik kontrolü ve hesap bilgisini inceler.
-- Son **Yayınla** tıklamasını kullanıcı yapar.
-- Yayın tamamlandıktan sonra Chrome penceresi kapatılır; mevcut sıralı akış bir sonraki hesaba geçer.
+## Seçilen denge
 
-Varyasyon üretimi ve Azure caption tek tık akışında kalır. Hesap başına son kontrol gerekir; bunu kaldırmak web otomasyonu riskini tekrar yükseltir.
+İstenen işleyiş gereği son **Yayınla** tıklaması otomatik kalır. Risk şu şekilde azaltılır:
 
-Bu değişiklik 0 izlenmeyi garanti olarak çözmez. Aynı özgün videonun telefon ve bu mod üzerinden kontrollü A/B testi yapılmalı; sonuç ayrıca TikTok Studio Account Status ve For You feed eligibility ile doğrulanmalıdır.
+- Session cookie Chrome'a enjekte edilmez.
+- Kullanıcı TikTok'a normal, görünür Chrome profilinde giriş yapar.
+- Stealth, fingerprint, WebDriver gizleme veya anti-bot bypass yaması kullanılmaz.
+- Caption yazımında `dispatchEvent(new InputEvent(...))` gibi açıkça sentetik JavaScript olayları kaldırılır.
+- Playwright'ın standart klavye ve tıklama aksiyonları kullanılır.
+- Uygulamadaki açık son onaydan sonra mevcut otomatik Publish tıklaması çalışır.
+- Hesaplar paralel değil sırayla işlenir; profil wrapperları her hesap sonunda geri yüklenir.
+- TikTok telif/içerik kontrolü tamamlanmamışsa yayın fail-closed durur.
+
+## Neden uzantı veya OS tıklaması seçilmedi
+
+Chrome eklentisindeki `element.click()` olayı `isTrusted=false` üretir. Debugger tabanlı eklenti veya OS otomasyonu ise otomasyonu gizlemeye çalışır, kırılgandır ve hesap güvenliği riskini büyütür. Mevcut Chrome'a CDP ile bağlanmak da CDP tespit yüzeyini kaldırmaz.
+
+## Gerçekçi sınır
+
+Bu sürüm önceki koda göre daha temiz ve daha az riskli bir otomasyon yüzeyi sağlar, ancak tespit edilmezlik veya izlenme garantisi vermez. Kesin düşük risk gerekiyorsa iki gerçek seçenek vardır: son tıklamayı kullanıcıya bırakmak veya TikTok denetiminden geçmiş resmî Content Posting API istemcisi kullanmak.
