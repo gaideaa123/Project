@@ -7,10 +7,24 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from PySide6.QtWidgets import QGridLayout
 
 import app as core
 import network_identity
 import proxy_health
+
+
+# app_tr is used with multiple app.py generations. The older adapter inserts a
+# horizontal row into a vertical layout, while the current processing panel is
+# a grid. This module is imported by app_tr before any window is constructed,
+# making this the guaranteed compatibility point on Windows and in CI.
+if not hasattr(QGridLayout, "insertLayout"):
+    def _grid_insert_layout(self, _index, layout, _stretch=0):
+        row = self.rowCount()
+        columns = max(1, self.columnCount())
+        self.addLayout(layout, row, 0, 1, columns)
+
+    QGridLayout.insertLayout = _grid_insert_layout
 
 
 def _account_name(account: dict[str, Any]) -> str:
@@ -165,11 +179,10 @@ if hasattr(core, "TikTokClient"):
 
         def _activate_proxy(self, account: dict[str, Any]) -> None:
             proxies = _proxies_for(account) or {}
-            for session_name in ("session", "direct"):
-                session = getattr(self.http, session_name, None)
-                if session is not None:
-                    session.proxies.clear()
-                    session.proxies.update(proxies)
+            session = getattr(self.http, "session", None)
+            if session is not None:
+                session.proxies.clear()
+                session.proxies.update(proxies)
 
         def access_token(self, account: dict[str, Any]) -> str:
             self._activate_proxy(account)
