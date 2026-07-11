@@ -10,6 +10,7 @@ import argparse
 from collections.abc import Sequence
 from typing import Optional
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from playwright_interactions import wait_for_user_assisted_page
@@ -30,32 +31,50 @@ def run_assisted_session(
 ) -> None:
     """Open an authorized test page and optionally perform explicit UI actions."""
 
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("url must be a non-empty string")
     if bool(text_selector) != (text is not None):
         raise ValueError("text_selector and text must be supplied together")
+    if text_selector is not None and not text_selector.strip():
+        raise ValueError("text_selector must not be empty")
+    if click_selector is not None and not click_selector.strip():
+        raise ValueError("click_selector must not be empty")
 
+    browser = None
+    context = None
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
-        context = browser.new_context(
-            **build_context_options(width=1280, height=720)
-        )
-        page = context.new_page()
-        apply_test_page_defaults(page, timeout_ms=20_000)
-
         try:
+            browser = playwright.chromium.launch(headless=headless)
+            context = browser.new_context(
+                **build_context_options(width=1280, height=720)
+            )
+            page = context.new_page()
+            apply_test_page_defaults(page, timeout_ms=20_000)
+
             print(f"Hedefe gidiliyor: {url}")
             wait_for_user_assisted_page(page, url, timeout_ms=60_000)
+
+            has_actions = text_selector is not None or click_selector is not None
+            print("Sayfa hazır. Giriş veya doğrulama gerekiyorsa tarayıcıda tamamlayın.")
+            if wait_for_enter:
+                input("Hazır olduğunuzda devam etmek için Enter'a basın: ")
 
             if text_selector is not None and text is not None:
                 human_typing(page, text_selector, text)
             if click_selector is not None:
                 human_mouse_move_and_click(page, click_selector)
 
-            print("Sayfa hazır. Giriş veya doğrulama gerekiyorsa tarayıcıda tamamlayın.")
-            if wait_for_enter:
-                input("Tarayıcıyı kapatmak için Enter'a basın: ")
+            if wait_for_enter and has_actions:
+                input("İşlemler tamamlandı. Tarayıcıyı kapatmak için Enter'a basın: ")
         finally:
-            context.close()
-            browser.close()
+            if context is not None:
+                try:
+                    context.close()
+                finally:
+                    if browser is not None:
+                        browser.close()
+            elif browser is not None:
+                browser.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-wait",
         action="store_true",
-        help="Sayfa hazır olduğunda Enter beklemeden tarayıcıyı kapat",
+        help="Kullanıcı onayı beklemeden yapılandırılan eylemleri çalıştır ve kapat",
     )
     return parser
 
@@ -86,7 +105,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             headless=args.headless,
             wait_for_enter=not args.no_wait,
         )
-    except (RuntimeError, ValueError) as exc:
+    except KeyboardInterrupt:
+        print("\nTest kullanıcı tarafından durduruldu.")
+        return 130
+    except (EOFError, PlaywrightError, RuntimeError, ValueError) as exc:
         print(f"Test başlatılamadı: {exc}")
         return 1
     return 0

@@ -34,9 +34,12 @@ python user_assisted_playwright.py \
   --click-selector '#continue'
 ```
 
-Giriş veya doğrulama çıkarsa tarayıcıda elle tamamlayın. `--headless` sadece
-arayüz gerektirmeyen test ortamları içindir; `--no-wait` sayfa hazır olduktan
-sonra Enter beklemeden oturumu kapatır.
+Sayfa açıldıktan sonra giriş veya doğrulamayı görünür tarayıcıda tamamlayın ve
+terminalde Enter'a basın. Yapılandırılan eylemler bundan sonra çalışır; eylem
+varsa sonucu inceleyebilmeniz için tarayıcı kapanmadan önce tekrar onay ister.
+
+`--headless` yalnızca arayüz gerektirmeyen test ortamları içindir. `--no-wait`
+kullanıcı onayı beklemeden eylemleri çalıştırır ve oturumu kapatır.
 
 ## Test
 
