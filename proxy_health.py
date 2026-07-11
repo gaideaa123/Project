@@ -6,15 +6,18 @@ import hashlib
 import json
 import statistics
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+from urllib.parse import urlparse
 
 import requests
 from platformdirs import user_data_dir
 
 import network_identity
+import socks_bridge
 
 UTC = timezone.utc
 DATA_DIR = Path(user_data_dir("signaldesk-profile-network", "SignalDesk"))
@@ -67,6 +70,26 @@ def _session(proxies: dict[str, str] | None = None) -> requests.Session:
  session.headers.update({"User-Agent": "SignalDesk-ProxyCheck/2.0"})
  return session
 
+@contextmanager
+def _identity_session(identity: network_identity.NetworkIdentity) -> Iterator[requests.Session]:
+ """Use the same local bridge as Chromium for SOCKS5, avoiding InvalidSchema."""
+ bridge = None
+ session = None
+ try:
+  if urlparse(identity.server).scheme.casefold() == "socks5":
+   bridge = socks_bridge.AuthenticatedSocksBridge(identity).start()
+   server = bridge.proxy["server"]
+   proxies = {"http": server, "https": server}
+  else:
+   proxies = network_identity.requests_proxies(identity)
+  session = _session(proxies)
+  yield session
+ finally:
+  if session is not None:
+   session.close()
+  if bridge is not None:
+   bridge.close()
+
 def _extract_ip(payload: dict[str, Any], field: str) -> str:
  value = str(payload.get(field) or "").strip()
  if field == "origin" and "," in value: value = value.split(",", 1)[0].strip()
@@ -107,9 +130,8 @@ def _geo_metadata(session: requests.Session, exit_ip: str, timeout: int) -> tupl
 
 def test(identity: network_identity.NetworkIdentity, attempts: int = 3, timeout: int = 15) -> ProxyHealth:
  identity.validate(); exits: list[str] = []; latencies: list[int] = []; direct = _direct_ip()
- proxy_map = network_identity.requests_proxies(identity)
  try:
-  with _session(proxy_map) as session:
+  with _identity_session(identity) as session:
    for _ in range(max(2, attempts)):
     started = time.perf_counter(); exits.append(_fetch_ip(session, timeout)); latencies.append(round((time.perf_counter() - started) * 1000))
    if not exits[0]: raise ProxyHealthError("Proxy çıkış IP döndürmedi")
@@ -158,14 +180,12 @@ def verify_browser_context(context, identity: network_identity.NetworkIdentity) 
  return expected
 
 def verify_browser_target(context, identity: network_identity.NetworkIdentity, target_url: str) -> ProxyHealth:
- """Prove the browser proxy can establish a tunnel to the actual publish host."""
  expected = verify_browser_context(context, identity)
  try:
   response = context.request.get(target_url, timeout=30000, max_redirects=5)
   if int(response.status) <= 0: raise ProxyHealthError("TikTok geçerli HTTP durumu döndürmedi")
  except Exception as exc:
   text = str(exc)
-  if "ERR_TUNNEL_CONNECTION_FAILED" in text or "tunnel" in text.casefold():
-   raise ProxyHealthError("Proxy TikTok HTTPS tüneli kuramadı") from exc
+  if "ERR_TUNNEL_CONNECTION_FAILED" in text or "tunnel" in text.casefold(): raise ProxyHealthError("Proxy TikTok HTTPS tüneli kuramadı") from exc
   raise ProxyHealthError(f"Proxy TikTok hedef testini geçemedi: {text}") from exc
  return expected
