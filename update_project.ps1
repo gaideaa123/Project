@@ -7,13 +7,13 @@ $files = @(
  "oauth_helper.py", "web_uploader.py", "web_upload_engine.py", "web_gui_integration.py",
  "tiktok_login.py", "tiktok_overlays.py", "copyright_dialog.py", "copyright_policy.py",
  "preflight_hook.py", "content_preflight.py", "video_variants.py", "uniquizer_tab.py",
- "session_gui.py", "session_account_gui.py", "publishing_flow_gui.py", "direct_connection_policy.py", "sitecustomize.py",
+ "session_gui.py", "session_account_gui.py", "publishing_flow_gui.py", "direct_connection_policy.py", "target_reachability.py", "sitecustomize.py",
  "media_qa.py", "antibot_resilience.py", "antibot_sandbox.py", "network_identity.py",
  "network_identity_gui.py", "proxy_health.py", "proxy_publisher.py", "socks_bridge.py",
  "smoke_test.py", "preflight_smoke.py", "media_qa_smoke.py", "antibot_resilience_smoke.py",
  "antibot_sandbox_smoke.py", "runtime_contract_smoke.py", "feature_presence_contract_test.py",
  "publish_flow_contract_test.py", "proxy_web_inheritance_test.py", "socks5_proxy_test.py",
- "socks5_health_bridge_test.py", "guide_proxy_assignment_test.py", "direct_connection_policy_test.py", "updater_contract_test.py",
+ "socks5_health_bridge_test.py", "guide_proxy_assignment_test.py", "direct_connection_policy_test.py", "target_reachability_test.py", "updater_contract_test.py",
  "README.md", "TURKCE_KURULUM.md", "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
 )
 $stage = Join-Path $env:TEMP ("signaldesk-update-" + [guid]::NewGuid().ToString("N"))
@@ -49,6 +49,8 @@ try {
  if ($LASTEXITCODE -ne 0) { throw "Guide proxy atama testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "direct_connection_policy_test.py")
  if ($LASTEXITCODE -ne 0) { throw "Direct IP yayin testi basarisiz" }
+ & $python (Join-Path $PSScriptRoot "target_reachability_test.py")
+ if ($LASTEXITCODE -ne 0) { throw "TikTok hedef erisim testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "runtime_contract_smoke.py")
  if ($LASTEXITCODE -ne 0) { throw "app_tr akis testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "smoke_test.py")
