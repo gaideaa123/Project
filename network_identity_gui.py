@@ -66,14 +66,15 @@ def install(window_class) -> None:
         type_row.addWidget(QLabel("Proxy tipi"))
         self.proxy_scheme = QComboBox()
         self.proxy_scheme.addItems(["http", "https", "socks5"])
+        self.proxy_scheme.currentTextChanged.connect(self.proxy_input_changed)
         type_row.addWidget(self.proxy_scheme)
         type_row.addStretch()
         layout.addLayout(type_row)
 
         self.proxy_list_input = QPlainTextEdit()
         self.proxy_list_input.setPlaceholderText(
-            "31.59.20.176:6754:eyuevehl:z4f560qnu6zj\n"
-            "31.56.127.193:7684:kullanici:parola"
+            "31.59.20.176:6754:kullanici:parola\n"
+            "31.56.127.193:7684:kullanici2:parola2"
         )
         self.proxy_list_input.setMinimumHeight(150)
         self.proxy_list_input.textChanged.connect(self.proxy_input_changed)
@@ -118,7 +119,7 @@ def install(window_class) -> None:
     def proxy_source(self) -> str:
         return f"{self.proxy_scheme.currentText()}\n{self.proxy_list_input.toPlainText().strip()}"
 
-    def proxy_input_changed(self) -> None:
+    def proxy_input_changed(self, *_args) -> None:
         if not hasattr(self, "proxy_assign_button"):
             return
         if self._tested_source and self.proxy_source() != self._tested_source:
