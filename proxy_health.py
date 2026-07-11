@@ -18,6 +18,7 @@ from platformdirs import user_data_dir
 
 import network_identity
 import socks_bridge
+import target_reachability
 
 UTC = timezone.utc
 DATA_DIR = Path(user_data_dir("signaldesk-profile-network", "SignalDesk"))
@@ -72,23 +73,17 @@ def _session(proxies: dict[str, str] | None = None) -> requests.Session:
 
 @contextmanager
 def _identity_session(identity: network_identity.NetworkIdentity) -> Iterator[requests.Session]:
- """Use the same local bridge as Chromium for SOCKS5, avoiding InvalidSchema."""
- bridge = None
- session = None
+ bridge = None; session = None
  try:
   if urlparse(identity.server).scheme.casefold() == "socks5":
-   bridge = socks_bridge.AuthenticatedSocksBridge(identity).start()
-   server = bridge.proxy["server"]
+   bridge = socks_bridge.AuthenticatedSocksBridge(identity).start(); server = bridge.proxy["server"]
    proxies = {"http": server, "https": server}
   else:
    proxies = network_identity.requests_proxies(identity)
-  session = _session(proxies)
-  yield session
+  session = _session(proxies); yield session
  finally:
-  if session is not None:
-   session.close()
-  if bridge is not None:
-   bridge.close()
+  if session is not None: session.close()
+  if bridge is not None: bridge.close()
 
 def _extract_ip(payload: dict[str, Any], field: str) -> str:
  value = str(payload.get(field) or "").strip()
@@ -102,8 +97,7 @@ def _fetch_ip(session: requests.Session, timeout: int) -> str:
    response = session.get(url, timeout=timeout); response.raise_for_status(); value = _extract_ip(response.json(), field)
    if value: return value
    errors.append(f"{url}: boş IP")
-  except Exception as exc:
-   errors.append(f"{url}: {type(exc).__name__}")
+  except Exception as exc: errors.append(f"{url}: {type(exc).__name__}")
  raise ProxyHealthError("IP doğrulama servislerine ulaşılamadı: " + ", ".join(errors))
 
 def _direct_ip() -> str:
@@ -120,12 +114,10 @@ def _geo_metadata(session: requests.Session, exit_ip: str, timeout: int) -> tupl
    if data.get("error") is True or data.get("success") is False: raise ValueError(str(data.get("reason") or data.get("message") or "geo error"))
    country = str(data.get("country_code") or data.get("country_code2") or data.get("country_code_iso2") or "").upper()
    connection = data.get("connection") if isinstance(data.get("connection"), dict) else {}
-   asn = str(data.get("asn") or connection.get("asn") or "")
-   org = str(data.get("org") or data.get("organization") or connection.get("org") or "")
+   asn = str(data.get("asn") or connection.get("asn") or ""); org = str(data.get("org") or data.get("organization") or connection.get("org") or "")
    if country or asn or org: return country, asn, org, ""
    errors.append(f"{url}: metadata boş")
-  except Exception as exc:
-   errors.append(f"{url}: {type(exc).__name__}")
+  except Exception as exc: errors.append(f"{url}: {type(exc).__name__}")
  return "", "", "", "Konum bilgisi alınamadı; bağlantı testi yine de geçti"
 
 def test(identity: network_identity.NetworkIdentity, attempts: int = 3, timeout: int = 15) -> ProxyHealth:
@@ -146,8 +138,7 @@ def test(identity: network_identity.NetworkIdentity, attempts: int = 3, timeout:
    result = ProxyHealth(fingerprint(identity), True, exits[0], country, median, datetime.now(UTC).isoformat(), detail, asn, org, tuple(flags))
  except Exception as exc:
   result = ProxyHealth(fingerprint(identity), False, exits[-1] if exits else "", "", round(statistics.median(latencies)) if latencies else 0, datetime.now(UTC).isoformat(), str(exc))
- record(result)
- return result
+ record(result); return result
 
 def latest(identity: network_identity.NetworkIdentity) -> ProxyHealth | None:
  row = _load().get(fingerprint(identity))
@@ -173,18 +164,20 @@ def verify_browser_context(context, identity: network_identity.NetworkIdentity) 
    if not response.ok: errors.append(f"HTTP {response.status}"); continue
    actual = _extract_ip(response.json(), field)
    if actual: break
-  except Exception as exc:
-   errors.append(type(exc).__name__)
+  except Exception as exc: errors.append(type(exc).__name__)
  if not actual: raise ProxyHealthError("Browser-context proxy testi başarısız: " + ", ".join(errors))
  if actual != expected.exit_ip: raise ProxyHealthError(f"Browser-context çıkış IP değişti: beklenen {expected.exit_ip}, görülen {actual}")
  return expected
 
 def verify_browser_target(context, identity: network_identity.NetworkIdentity, target_url: str) -> ProxyHealth:
+ """A received HTTP response proves the proxy reached TikTok, even if body streaming aborts."""
  expected = verify_browser_context(context, identity)
  try:
   response = context.request.get(target_url, timeout=30000, max_redirects=5)
   if int(response.status) <= 0: raise ProxyHealthError("TikTok geçerli HTTP durumu döndürmedi")
  except Exception as exc:
+  if target_reachability.response_was_received(exc):
+   return expected
   text = str(exc)
   if "ERR_TUNNEL_CONNECTION_FAILED" in text or "tunnel" in text.casefold(): raise ProxyHealthError("Proxy TikTok HTTPS tüneli kuramadı") from exc
   raise ProxyHealthError(f"Proxy TikTok hedef testini geçemedi: {text}") from exc
