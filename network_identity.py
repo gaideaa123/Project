@@ -2,10 +2,9 @@ from __future__ import annotations
 
 """Stable, operator-provided network identity per browser profile.
 
-This module intentionally does not rotate proxies, spoof device fingerprints or
-bypass platform controls. It only lets an authorized operator bind one persistent
-browser profile to one fixed outbound gateway and keeps credentials in the OS
-keychain.
+No proxy rotation or fingerprint spoofing is performed. Each account is bound to
+one fixed proxy and keeps that assignment across runs. Credentials are stored in
+the operating-system keychain, never in project files.
 """
 
 from dataclasses import dataclass
@@ -32,13 +31,13 @@ class NetworkIdentity:
             return
         parsed = urlparse(self.server)
         if parsed.scheme.casefold() not in ALLOWED_SCHEMES:
-            raise NetworkIdentityError("Ağ geçidi http, https veya socks5 olmalı")
+            raise NetworkIdentityError("Proxy http, https veya socks5 olmalı")
         if not parsed.hostname or not parsed.port:
-            raise NetworkIdentityError("Ağ geçidi host ve port içermeli")
+            raise NetworkIdentityError("Proxy host ve port içermeli")
         if parsed.username or parsed.password:
-            raise NetworkIdentityError("Kullanıcı/parolayı URL içine değil ayrı alanlara girin")
+            raise NetworkIdentityError("Kullanıcı/parolayı proxy URL içine gömmeyin")
         if bool(self.username) != bool(self.password):
-            raise NetworkIdentityError("Ağ geçidi kullanıcı adı ve parolası birlikte girilmeli")
+            raise NetworkIdentityError("Proxy kullanıcı adı ve parolası birlikte girilmeli")
 
     def playwright_proxy(self) -> dict[str, str] | None:
         self.validate()
@@ -49,6 +48,48 @@ class NetworkIdentity:
             value["username"] = self.username
             value["password"] = self.password
         return value
+
+
+def parse_proxy_line(value: str, default_scheme: str = "http") -> NetworkIdentity:
+    """Parse host:port:user:pass or scheme://host:port:user:pass."""
+    raw = value.strip()
+    if not raw:
+        raise NetworkIdentityError("Boş proxy satırı")
+    scheme = default_scheme
+    if "://" in raw:
+        scheme, raw = raw.split("://", 1)
+    if scheme.casefold() not in ALLOWED_SCHEMES:
+        raise NetworkIdentityError(f"Desteklenmeyen proxy tipi: {scheme}")
+    parts = raw.split(":", 3)
+    if len(parts) not in {2, 4}:
+        raise NetworkIdentityError(
+            "Proxy formatı host:port veya host:port:kullanıcı:parola olmalı"
+        )
+    host, port = parts[0].strip(), parts[1].strip()
+    if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise NetworkIdentityError("Proxy host/port geçersiz")
+    username, password = (parts[2], parts[3]) if len(parts) == 4 else ("", "")
+    identity = NetworkIdentity(f"{scheme.casefold()}://{host}:{port}", username, password)
+    identity.validate()
+    return identity
+
+
+def parse_proxy_list(value: str, default_scheme: str = "http") -> list[NetworkIdentity]:
+    identities: list[NetworkIdentity] = []
+    for line_number, line in enumerate(value.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            identities.append(parse_proxy_line(stripped, default_scheme))
+        except NetworkIdentityError as exc:
+            raise NetworkIdentityError(f"Satır {line_number}: {exc}") from exc
+    if not identities:
+        raise NetworkIdentityError("En az bir proxy girin")
+    servers = [item.server for item in identities]
+    if len(servers) != len(set(servers)):
+        raise NetworkIdentityError("Aynı proxy listede birden fazla kez kullanılamaz")
+    return identities
 
 
 def _profile_key(profile: str, field: str) -> str:
@@ -77,6 +118,19 @@ def save(profile: str, identity: NetworkIdentity) -> None:
     keyring.set_password(SERVICE, _profile_key(profile, "server"), identity.server)
     keyring.set_password(SERVICE, _profile_key(profile, "username"), identity.username)
     keyring.set_password(SERVICE, _profile_key(profile, "password"), identity.password)
+
+
+def assign_in_order(profiles: list[str], identities: list[NetworkIdentity]) -> list[tuple[str, NetworkIdentity]]:
+    if not profiles:
+        raise NetworkIdentityError("Proxy atanacak hesap yok")
+    if len(identities) < len(profiles):
+        raise NetworkIdentityError(
+            f"{len(profiles)} hesap var ama {len(identities)} proxy girildi. Her hesap için bir proxy gerekli."
+        )
+    assignments = list(zip(profiles, identities, strict=False))
+    for profile, identity in assignments:
+        save(profile, identity)
+    return assignments
 
 
 def delete(profile: str) -> None:
