@@ -9,6 +9,9 @@ import tiktok_overlays
 class Candidate:
  def __init__(self, label="Aç", inside=True, click_error=False):
   self.label = label; self.inside = inside; self.click_error = click_error; self.clicks = []
+ @property
+ def first(self): return self
+ def count(self): return 1
  def get_attribute(self, name): return self.label if name == "aria-label" else None
  def inner_text(self, timeout=0): return self.label
  def is_visible(self, timeout=0): return True
@@ -20,11 +23,14 @@ class Candidate:
 
 class Collection:
  def __init__(self, rows): self.rows = rows
+ @property
+ def first(self): return self.rows[0]
  def count(self): return len(self.rows)
  def nth(self, index): return self.rows[index]
 
 class Page:
- def __init__(self, rows): self.rows = rows; self.frames = []; self.main_frame = self; self.mouse = MagicMock(); self.waits = []
+ def __init__(self, rows):
+  self.rows = rows; self.frames = []; self.main_frame = self; self.mouse = MagicMock(); self.waits = []
  def locator(self, selector): return Collection(self.rows)
  def wait_for_timeout(self, value): self.waits.append(value)
  def is_closed(self): return False
@@ -39,8 +45,10 @@ def main() -> None:
  assert tiktok_overlays.CONTENT_CHECK_TEXT.search("Otomatik içerik kontrolleri açılsın mı? Müzik telif hakkı kontrolü İçerik kontrolü (hafif)")
 
  calls = []
+ context = MagicMock()
+ context.cookies.return_value = []
  uploader = SimpleNamespace(
-  launch_context=lambda playwright, profile: MagicMock(cookies=lambda *args: [], clear_cookies=lambda **kwargs: None, add_cookies=lambda rows: None),
+  launch_context=lambda playwright, profile: context,
   wait_for_login=lambda page, timeout_seconds=600: calls.append("wait"),
   upload_file=lambda page, video: calls.append("upload"),
   fill_caption=lambda page, caption, timeout_seconds=180: calls.append("caption"),
