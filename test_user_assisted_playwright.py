@@ -96,10 +96,61 @@ class AssistedRunnerTests(unittest.TestCase):
         self.assertTrue(browser.context.closed)
         self.assertTrue(browser.closed)
 
+    def test_user_confirmation_happens_before_actions(self):
+        fake = FakePlaywrightContextManager()
+        events = []
+        with (
+            patch.object(runner, "sync_playwright", return_value=fake),
+            patch.object(runner, "wait_for_user_assisted_page"),
+            patch.object(
+                runner, "human_typing", side_effect=lambda *args: events.append("type")
+            ),
+            patch.object(
+                runner,
+                "human_mouse_move_and_click",
+                side_effect=lambda *args: events.append("click"),
+            ),
+            patch("builtins.input", side_effect=lambda prompt: events.append("prompt")),
+        ):
+            runner.run_assisted_session(
+                text_selector="#caption",
+                text="test",
+                click_selector="#continue",
+            )
+
+        self.assertEqual(events, ["prompt", "type", "click", "prompt"])
+
+    def test_browser_closes_when_context_creation_fails(self):
+        fake = FakePlaywrightContextManager()
+        browser = fake.chromium.browser
+
+        def fail_context(**kwargs):
+            raise RuntimeError("context failed")
+
+        browser.new_context = fail_context
+        with patch.object(runner, "sync_playwright", return_value=fake):
+            with self.assertRaises(RuntimeError):
+                runner.run_assisted_session(wait_for_enter=False)
+
+        self.assertTrue(browser.closed)
+
     def test_text_selector_and_text_must_be_supplied_together(self):
         with self.assertRaises(ValueError):
             runner.run_assisted_session(
                 text_selector="#caption",
+                wait_for_enter=False,
+            )
+
+    def test_empty_selectors_are_rejected(self):
+        with self.assertRaises(ValueError):
+            runner.run_assisted_session(
+                text_selector=" ",
+                text="test",
+                wait_for_enter=False,
+            )
+        with self.assertRaises(ValueError):
+            runner.run_assisted_session(
+                click_selector=" ",
                 wait_for_enter=False,
             )
 
