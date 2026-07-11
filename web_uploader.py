@@ -18,6 +18,7 @@ from playwright.sync_api import BrowserContext, Locator, Page, Playwright, Timeo
 
 import network_identity
 import proxy_health
+import socks_bridge
 
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
 DATA_ROOT = Path(user_data_dir("signaldesk-web-uploader", "SignalDesk"))
@@ -124,14 +125,12 @@ def save_diagnostics(page: Page, profile: str, error: Exception) -> Path:
  return folder
 
 def browser_proxy_candidates(identity) -> list[dict[str, str]]:
- """Keep the configured proxy first; HTTPS endpoints get a safe HTTP CONNECT fallback."""
  primary = identity.playwright_proxy()
  if not primary: return []
  candidates = [primary]
  parsed = urlparse(identity.server)
  if parsed.scheme.casefold() == "https":
-  fallback = dict(primary); fallback["server"] = f"http://{parsed.hostname}:{parsed.port}"
-  candidates.append(fallback)
+  fallback = dict(primary); fallback["server"] = f"http://{parsed.hostname}:{parsed.port}"; candidates.append(fallback)
  return candidates
 
 def _launch(playwright: Playwright, options: dict) -> BrowserContext:
@@ -140,12 +139,31 @@ def _launch(playwright: Playwright, options: dict) -> BrowserContext:
   if "channel" not in str(exc).casefold() and "executable" not in str(exc).casefold(): raise
   return playwright.chromium.launch_persistent_context(**options)
 
+def _close_context(context: BrowserContext | None) -> None:
+ if context is not None:
+  try: context.close()
+  except Exception: pass
+
 def launch_context(playwright: Playwright, profile: str) -> BrowserContext:
  profile_dir = DATA_ROOT / "profiles" / safe_profile_name(profile); profile_dir.mkdir(parents=True, exist_ok=True)
- identity = network_identity.load(profile)
+ identity = network_identity.load(profile); parsed = urlparse(identity.server)
  base = dict(user_data_dir=str(profile_dir), headless=False, viewport=None, no_viewport=True, args=["--start-maximized", "--disable-notifications"])
- if not identity.server:
-  return _launch(playwright, base)
+ if not identity.server: return _launch(playwright, base)
+
+ if parsed.scheme.casefold() == "socks5":
+  bridge = socks_bridge.AuthenticatedSocksBridge(identity).start(); context = None
+  try:
+   options = dict(base); options["proxy"] = bridge.proxy
+   context = _launch(playwright, options)
+   proxy_health.verify_browser_target(context, identity, UPLOAD_URL)
+   context.on("close", lambda: bridge.close())
+   return context
+  except Exception as exc:
+   _close_context(context); bridge.close()
+   raise UploadError(
+    f"{profile}: SOCKS5 proxy TikTok'a bağlanamıyor. Kullanıcı adı, parola, host ve portu kontrol edin. Detay: {exc}"
+   ) from exc
+
  errors: list[str] = []
  for candidate in browser_proxy_candidates(identity):
   context = None
@@ -155,10 +173,7 @@ def launch_context(playwright: Playwright, profile: str) -> BrowserContext:
    proxy_health.verify_browser_target(context, identity, UPLOAD_URL)
    return context
   except Exception as exc:
-   errors.append(str(exc))
-   if context is not None:
-    try: context.close()
-    except Exception: pass
+   errors.append(str(exc)); _close_context(context)
  raise UploadError(
   f"{profile}: atanmış proxy TikTok'a bağlanamıyor. Doğrudan bağlantıya düşülmedi. "
   f"Proxy Listesi'nde bu proxyyi yeniden test edin veya değiştirin. Detay: {' | '.join(errors)}"
@@ -169,7 +184,7 @@ def goto_upload(page: Page) -> None:
  except Exception as exc:
   text = str(exc)
   if "ERR_TUNNEL_CONNECTION_FAILED" in text or "tunnel" in text.casefold():
-   raise UploadError("Proxy TikTok HTTPS tünelini kuramadı. Proxy Listesi'nde farklı bir proxy atayın.") from exc
+   raise UploadError("Proxy TikTok HTTPS tünelini kuramadı. Proxy Listesi'nde proxy bilgilerini kontrol edin.") from exc
   raise
 
 def prepare_upload(request: UploadRequest) -> None:

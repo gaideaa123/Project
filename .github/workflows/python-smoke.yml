@@ -29,7 +29,7 @@ jobs:
      run: |
       python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py sitecustomize.py
       python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py session_account_gui.py publishing_flow_gui.py
-      python -m py_compile antibot_resilience.py antibot_sandbox.py
+      python -m py_compile antibot_resilience.py antibot_sandbox.py socks_bridge.py
       python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
       python -m py_compile utils/antibot_resilience.py utils/network_identity.py
       python -m py_compile playwright_interactions.py user_assisted_playwright.py
@@ -40,6 +40,7 @@ jobs:
       python risk_controls_smoke.py
       python proxy_health_false_negative_test.py
       python proxy_web_inheritance_test.py
+      python socks5_proxy_test.py
    - name: App TR layout startup smoke
      run: python layout_compat_smoke.py
    - name: Feature contract
