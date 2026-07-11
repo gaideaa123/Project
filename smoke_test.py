@@ -48,17 +48,23 @@ def main() -> None:
     check("PUBLISH_TEXT.search(text)" in inspect.getsource(tiktok_overlays._enable_content_check), "paylaş/telif dialogu onboarding Aç akışından hariç")
 
     login_source = inspect.getsource(tiktok_login.install)
-    check("confirm_for_every_profile" in login_source, "telif onayı tüm profillerde")
+    check("confirm_for_every_profile" in login_source, "telif kontrolü tüm profillerde")
     check("is_first_profile_video" not in login_source, "1.mp4 özel kısıtı kaldırıldı")
     check("no_copyright_confirm" not in login_source, "sonraki profillerde telif handler kapatılmıyor")
     check("web_uploader.confirm_publish_dialog = confirm_for_every_profile" in login_source, "global ve profil çağrısı telif handler'a bağlı")
     check("previous_confirm" in login_source, "wrapper profil sonrası güvenli geri yüklenir")
-    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Hemen paylaş") is not None, "tüm profiller exact Hemen paylaş")
+
+    copyright_source = inspect.getsource(copyright_dialog.handle)
+    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Hemen paylaş") is not None, "Hemen paylaş uyarısı tanınır")
+    check(copyright_dialog.CANCEL.fullmatch("İptal") is not None, "İptal düğmesi exact tanınır")
+    check("_click_exact_cancel" in copyright_source, "eksik kontrolde İptal tıklanır")
+    check("_click_immediate_share" not in inspect.getsource(copyright_dialog), "eksik telif kontrolü zorla geçilmez")
+    check("CopyrightDialogError" in copyright_source, "eksik kontrolden sonra yayın fail-closed durur")
 
     flow = inspect.getsource(web_uploader.prepare_upload)
     steps = ["button.click(", "confirm_publish_dialog(", "wait_for_publish_result("]
     positions = [flow.index(step) for step in steps]
-    check(positions == sorted(positions), "Paylaş → tüm profillerde Hemen paylaş → sonuç")
+    check(positions == sorted(positions), "Paylaş → telif kontrol kapısı → doğrulanmış sonuç")
 
     qt = QApplication.instance() or QApplication([])
     with patch.object(app_tr.tiktok_login, "has_session", return_value=False), patch.object(app_tr.tiktok_login, "has_credentials", return_value=False):
@@ -82,7 +88,7 @@ def main() -> None:
                 start.assert_called_once_with(expected)
         window.close()
     qt.quit()
-    print("\nİÇERİK KONTROLÜ AÇIK VE TÜM PROFİL TELİF TESTLERİ GEÇTİ")
+    print("\nİÇERİK KONTROLÜ FAIL-CLOSED VE SIRALI YAYIN TESTLERİ GEÇTİ")
 
 
 if __name__ == "__main__":
