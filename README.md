@@ -1,29 +1,26 @@
 # SignalDesk Publisher
 
-A production-oriented Python desktop dashboard for legitimate agency content delivery. It creates standard H.264 renditions, stores channel credentials in the OS keychain, and schedules posts through TikTok's documented Content Posting API.
+A production-oriented Python desktop dashboard for legitimate agency content delivery. It creates standard H.264 renditions, stores channel credentials in the OS keychain, and supports the direct `app_tr.py` Azure GPT + visible TikTok Studio workflow.
 
-The project intentionally excludes fingerprint evasion, stealth account isolation, engagement manipulation, and mass duplicate posting.
+## Supported app_tr workflow
 
-## Capabilities
+1. Run `python app_tr.py`.
+2. Add profiles in the intended order.
+3. Select one source video and create the desired number of variants.
+4. Outputs are named `1.mp4`, `2.mp4`, `3.mp4`, and so on.
+5. `1.mp4` is assigned to the first profile, `2.mp4` to the second profile, and so on.
+6. Azure GPT creates a caption for the current profile.
+7. The visible web uploader completes that profile, then advances to the next one.
 
-- Dark PySide6 dashboard with Profile Manager, Asset Processing, and Deployment Queue tabs
-- Real `threading.Thread` workers for encoding and network requests
-- Batch output selection with 1 to 100 renditions
-- H.264 High Profile, CRF 20 to 23, standard resolutions, light unsharp, optional micro grain, AAC, 44.1/48 kHz, EBU-style loudness normalization, fast-start container layout
-- Atomic `pipeline_registry.json` with backup recovery
-- Tokens stored in Windows Credential Manager, macOS Keychain, or Linux Secret Service
-- TikTok OAuth refresh, creator-info query, Direct Post initialization, and official chunked upload
-- Deterministic 23-hour guard checked both when a post is queued and immediately before upload
-- Daily recurrence that always advances beyond the protected window
+The pipeline deliberately stays sequential so browser sessions, profile cookies, captions, and confirmation state cannot cross between accounts.
 
 ## Requirements
 
 - Python 3.11+
 - FFmpeg and FFprobe on `PATH`
-- A TikTok developer application with Login Kit and Content Posting API access
-- User authorization for the required scopes, including `video.publish`
-
-Unaudited TikTok clients are restricted to private posts. Public visibility requires TikTok review and compliance with its UX and API policies.
+- Google Chrome or Playwright Chromium
+- An Azure OpenAI chat-completions deployment
+- Authorized TikTok accounts
 
 ## Install
 
@@ -35,6 +32,8 @@ py -3.11 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+python -m playwright install chromium
+python app_tr.py
 ```
 
 macOS:
@@ -45,6 +44,8 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+python -m playwright install chromium
+python app_tr.py
 ```
 
 Ubuntu or Debian:
@@ -56,41 +57,29 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+python -m playwright install chromium
+python app_tr.py
 ```
 
-## Configure and run
+## Security and state
 
-Do not commit app credentials. Supply them through the environment:
+Azure keys, TikTok sessions, and profile credentials are stored through the operating-system keychain. `sitecustomize.py` is intentionally side-effect free: Azure requests are made explicitly by `app_tr.py`, and no global HTTP or Qt monkey patch is used.
+
+Application data and diagnostics use the platform-standard user-data directory. Diagnostics can include screenshots or page HTML, so treat that directory as sensitive and remove old captures when they are no longer needed.
+
+## Publishing reality
+
+The uploader verifies local media quality, keeps content checks enabled, and refuses to force publishing while TikTok reports an incomplete copyright check. These controls remove known false-success paths, but no client code can guarantee views. If a confirmed post remains at zero, check TikTok Studio account status, post visibility, processing state, and For You feed eligibility.
+
+## Tests
 
 ```bash
-export TIKTOK_CLIENT_KEY="your-client-key"
-export TIKTOK_CLIENT_SECRET="your-client-secret"
-python app.py
+python runtime_contract_smoke.py
+python smoke_test.py
+python preflight_smoke.py
+python media_qa_smoke.py
+python antibot_resilience_smoke.py
+python antibot_sandbox_smoke.py
 ```
 
-PowerShell:
-
-```powershell
-$env:TIKTOK_CLIENT_KEY="your-client-key"
-$env:TIKTOK_CLIENT_SECRET="your-client-secret"
-python app.py
-```
-
-Initial user access and refresh tokens are entered in Profile Manager and saved through `keyring`.
-
-## State and rate-limit behavior
-
-Application data uses the platform-standard user data directory. `pipeline_registry.json` stores profiles, queue state, token expiry, and the last accepted submission timestamp. It does not store tokens.
-
-The guard rejects a new queue item when another queued or running post for the same profile is within 23 hours. Immediately before every upload, `claim_due_job()` atomically rechecks the profile's `last_post_at`. When TikTok accepts a submission, `complete_job()` atomically records that timestamp. This closes the usual race between the scheduler and worker thread.
-
-## Official references
-
-- https://developers.tiktok.com/doc/content-posting-api-get-started
-- https://developers.tiktok.com/doc/content-posting-api-reference-direct-post
-- https://developers.tiktok.com/doc/content-posting-api-media-transfer-guide
-- https://developers.tiktok.com/doc/oauth-user-access-token-management
-
-## Production hardening
-
-For shared or unattended deployments, move OAuth exchange to a controlled backend, add signed updates, package with PyInstaller, poll publication status, and add integration tests against a sandbox account. This desktop build is designed for one authorized agency operator.
+The runtime contract test locks the supported behavior: numbered variants, ordered profile assignment, explicit Azure caption generation, sequential web upload, and restoration of profile-specific wrappers after errors.
