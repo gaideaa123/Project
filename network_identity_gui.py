@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Test-first, one-proxy-per-account configuration tab."""
+"""Test-first proxy assignment using the exact Guide + Profiller order."""
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
@@ -17,7 +17,8 @@ class ProxyTestWorker(QThread):
  failed = Signal(str)
 
  def __init__(self, identities: list[network_identity.NetworkIdentity], parent=None):
-  super().__init__(parent); self.identities = identities
+  super().__init__(parent)
+  self.identities = identities
 
  def run(self) -> None:
   try:
@@ -27,121 +28,180 @@ class ProxyTestWorker(QThread):
   except Exception as exc:
    self.failed.emit(str(exc))
 
+def guide_profiles(window) -> list[str]:
+ """Use the same persisted order shown by Guide + Profiller."""
+ try:
+  import publishing_flow_gui
+  if hasattr(window, "guide_profiles_page"):
+   return publishing_flow_gui.profiles(window)
+ except Exception:
+  pass
+ if hasattr(window, "account_names"):
+  return list(window.account_names())
+ return []
+
 def install(window_class) -> None:
- if getattr(window_class, "_network_identity_gui_installed", False): return
- original_build = window_class.build_ui; original_refresh = window_class.refresh
+ if getattr(window_class, "_network_identity_gui_installed", False):
+  return
+ original_build = window_class.build_ui
+ original_refresh = window_class.refresh
 
- def account_names(self) -> list[str]:
-  snapshot = self.registry.snapshot()
-  return [str(row.get("profile_name") or row.get("name") or "").strip()
-          for row in snapshot.get("accounts", [])
-          if str(row.get("profile_name") or row.get("name") or "").strip()]
-
- def network_tab(self) -> QWidget:
-  page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0,18,0,0); layout.setSpacing(14)
-  title = QLabel("Proxy Testi ve Hesap Eşleştirme"); title.setObjectName("sectionTitle")
+ def network_tab(self):
+  page = QWidget(); layout = QVBoxLayout(page)
+  title = QLabel("Proxy Testi ve Guide Profil Eşleştirme")
+  title.setStyleSheet("font-size: 20px; font-weight: 700")
   guide = QLabel(
-   "Her satıra host:port:kullanıcı:parola yazın. Bağlantı, sabit çıkış IP ve "
-   "gecikme zorunlu testtir; ülke/ASN bilgisi yalnız bilgilendirmedir. İlk proxy "
-   "ilk hesaba, ikinci proxy ikinci hesaba atanır."
-  ); guide.setObjectName("muted"); guide.setWordWrap(True)
-  layout.addWidget(title); layout.addWidget(guide)
-  type_row = QHBoxLayout(); type_row.addWidget(QLabel("Proxy tipi")); self.proxy_scheme = QComboBox()
-  self.proxy_scheme.addItems(["http","https","socks5"]); self.proxy_scheme.currentTextChanged.connect(self.proxy_input_changed)
-  type_row.addWidget(self.proxy_scheme); type_row.addStretch(); layout.addLayout(type_row)
-  self.proxy_list_input = QPlainTextEdit(); self.proxy_list_input.setPlaceholderText(
-   "31.59.20.176:6754:kullanici:parola\n31.56.127.193:7684:kullanici2:parola2"
-  ); self.proxy_list_input.setMinimumHeight(150); self.proxy_list_input.textChanged.connect(self.proxy_input_changed)
+   "Proxyleri önce test et. Yalnız testi geçen proxyler, Guide + Profiller "
+   "sekmesindeki güncel sıraya göre atanır: ilk geçen proxy ilk profile."
+  )
+  guide.setWordWrap(True); layout.addWidget(title); layout.addWidget(guide)
+  scheme_row = QHBoxLayout(); scheme_row.addWidget(QLabel("Proxy tipi"))
+  self.proxy_scheme = QComboBox(); self.proxy_scheme.addItems(["http", "https", "socks5"])
+  self.proxy_scheme.currentTextChanged.connect(self.proxy_input_changed)
+  scheme_row.addWidget(self.proxy_scheme); scheme_row.addStretch(); layout.addLayout(scheme_row)
+  self.proxy_list_input = QPlainTextEdit()
+  self.proxy_list_input.setPlaceholderText(
+   "socks5://kullanici:parola@host:port\n"
+   "host:port:kullanici:parola"
+  )
+  self.proxy_list_input.setMinimumHeight(150)
+  self.proxy_list_input.textChanged.connect(self.proxy_input_changed)
   layout.addWidget(self.proxy_list_input)
-  actions = QHBoxLayout(); self.proxy_test_button = QPushButton("1. PROXYLERİ TEST ET")
-  self.proxy_test_button.clicked.connect(self.test_proxy_list); self.proxy_assign_button = QPushButton("2. TESTİ GEÇENLERİ SIRAYLA ATA")
-  self.proxy_assign_button.setObjectName("primaryButton"); self.proxy_assign_button.setEnabled(False); self.proxy_assign_button.clicked.connect(self.assign_proxy_list)
-  clear = QPushButton("Atamaları kaldır"); clear.setObjectName("quietButton"); clear.clicked.connect(self.clear_all_proxy_assignments)
-  for button in (self.proxy_test_button,self.proxy_assign_button,clear): actions.addWidget(button)
+  actions = QHBoxLayout()
+  self.proxy_test_button = QPushButton("1. PROXYLERİ TEST ET")
+  self.proxy_test_button.clicked.connect(self.test_proxy_list)
+  self.proxy_assign_button = QPushButton("2. TESTİ GEÇENLERİ GUIDE PROFİLLERİNE SIRAYLA ATA")
+  self.proxy_assign_button.setObjectName("primaryButton"); self.proxy_assign_button.setEnabled(False)
+  self.proxy_assign_button.clicked.connect(self.assign_proxy_list)
+  clear = QPushButton("Tüm atamaları kaldır"); clear.clicked.connect(self.clear_all_proxy_assignments)
+  for button in (self.proxy_test_button, self.proxy_assign_button, clear): actions.addWidget(button)
   actions.addStretch(); layout.addLayout(actions)
-  self.proxy_mapping = QTableWidget(0,7); self.proxy_mapping.setHorizontalHeaderLabels(
-   ["Sıra","Hesap","Proxy","Test","Çıkış IP","Ülke / Gecikme","Detay"]
-  ); header=self.proxy_mapping.horizontalHeader(); header.setSectionResizeMode(QHeaderView.ResizeToContents)
-  header.setSectionResizeMode(2,QHeaderView.Stretch); header.setSectionResizeMode(6,QHeaderView.Stretch)
-  layout.addWidget(self.proxy_mapping,1); self.proxy_status=QLabel("Listeyi girin, sonra proxyleri test edin.")
-  self.proxy_status.setObjectName("muted"); self.proxy_status.setWordWrap(True); layout.addWidget(self.proxy_status)
-  self._tested_identities=[]; self._test_results={}; self._tested_source=""; self.proxy_test_worker=None
+  self.proxy_mapping = QTableWidget(0, 6)
+  self.proxy_mapping.setHorizontalHeaderLabels(["Sıra", "Guide profili", "Proxy", "Test", "Çıkış IP", "Detay"])
+  header = self.proxy_mapping.horizontalHeader(); header.setSectionResizeMode(QHeaderView.ResizeToContents)
+  header.setSectionResizeMode(1, QHeaderView.Stretch); header.setSectionResizeMode(2, QHeaderView.Stretch); header.setSectionResizeMode(5, QHeaderView.Stretch)
+  layout.addWidget(self.proxy_mapping, 1)
+  self.proxy_status = QLabel("Önce proxyleri test edin."); self.proxy_status.setWordWrap(True); layout.addWidget(self.proxy_status)
+  self._tested_identities = []; self._test_results = {}; self._tested_source = ""; self.proxy_test_worker = None
   return page
 
  def proxy_source(self) -> str:
   return f"{self.proxy_scheme.currentText()}\n{self.proxy_list_input.toPlainText().strip()}"
 
- def proxy_input_changed(self,*_args) -> None:
-  if hasattr(self,"proxy_assign_button") and self._tested_source and self.proxy_source()!=self._tested_source:
-   self.proxy_assign_button.setEnabled(False); self.proxy_status.setText("Liste değişti. Atamadan önce yeniden test edin.")
+ def proxy_input_changed(self, *_args) -> None:
+  if not hasattr(self, "proxy_assign_button"):
+   return
+  if self._tested_source != self.proxy_source():
+   self.proxy_assign_button.setEnabled(False)
+   if self._tested_source:
+    self.proxy_status.setText("Proxy listesi değişti. Atamadan önce yeniden test edin.")
 
  def refresh_proxy_mapping(self) -> None:
-  profiles=self.account_names(); tested=getattr(self,"_tested_identities",[]); rows=max(len(profiles),len(tested)); self.proxy_mapping.setRowCount(rows)
+  profiles = guide_profiles(self); tested = list(getattr(self, "_tested_identities", []))
+  rows = max(len(profiles), len(tested)); self.proxy_mapping.setRowCount(rows)
   for row in range(rows):
-   profile=profiles[row] if row<len(profiles) else ""; saved=network_identity.load(profile) if profile else network_identity.NetworkIdentity()
-   identity=tested[row] if row<len(tested) else saved; result=self._test_results.get(row)
-   if result is None and identity.server: result=proxy_health.latest(identity)
-   state="GEÇTİ" if result and result.ok else "BAŞARISIZ" if result else "Test yok"
-   values=[str(row+1),profile or "Hesap yok",identity.server or "Doğrudan bağlantı",state,
-           result.exit_ip if result else "",f"{result.country_code or '-'} / {result.median_latency_ms} ms" if result else "",
-           result.detail if result else ""]
-   for column,value in enumerate(values): self.proxy_mapping.setItem(row,column,QTableWidgetItem(value))
+   profile = profiles[row] if row < len(profiles) else ""
+   tested_identity = tested[row] if row < len(tested) else None
+   saved = network_identity.load(profile) if profile else network_identity.NetworkIdentity()
+   identity = tested_identity or saved; result = self._test_results.get(row)
+   values = [
+    str(row + 1), profile or "Profil yok", identity.server or "Atanmadı",
+    "GEÇTİ" if result and result.ok else "BAŞARISIZ" if result else "Test bekliyor",
+    result.exit_ip if result else "", result.detail if result else "",
+   ]
+   for column, value in enumerate(values):
+    self.proxy_mapping.setItem(row, column, QTableWidgetItem(value))
 
- def handle_proxy_result(self,index,result) -> None:
-  self._test_results[index]=result; self.refresh_proxy_mapping(); completed=len(self._test_results)
-  self.proxy_status.setText(f"Test sürüyor: {completed}/{len(self._tested_identities)} tamamlandı")
+ def handle_proxy_result(self, index, result) -> None:
+  self._test_results[index] = result; self.refresh_proxy_mapping()
+  self.proxy_status.setText(f"Test sürüyor: {len(self._test_results)}/{len(self._tested_identities)}")
 
  def test_proxy_list(self) -> None:
-  if self.proxy_test_worker and self.proxy_test_worker.isRunning(): return
+  if self.proxy_test_worker and self.proxy_test_worker.isRunning():
+   return
   try:
-   self._tested_identities=network_identity.parse_proxy_list(self.proxy_list_input.toPlainText(),self.proxy_scheme.currentText())
-   self._test_results={}; self._tested_source=self.proxy_source(); self.proxy_test_button.setEnabled(False); self.proxy_assign_button.setEnabled(False)
-   self.proxy_status.setText("Proxyler bağlantı, sabit çıkış IP ve gecikme açısından test ediliyor..."); self.refresh_proxy_mapping()
-   worker=ProxyTestWorker(self._tested_identities,self); self.proxy_test_worker=worker; worker.row_result.connect(self.handle_proxy_result)
-   worker.completed.connect(self.proxy_test_finished); worker.failed.connect(self.proxy_test_failed); worker.start()
-  except Exception as exc: QMessageBox.critical(self,"Proxy test hatası",str(exc))
+   identities = network_identity.parse_proxy_list(self.proxy_list_input.toPlainText(), self.proxy_scheme.currentText())
+   profiles = guide_profiles(self)
+   if not profiles:
+    raise RuntimeError("Guide + Profiller sekmesinde atanacak profil yok")
+   self._tested_identities = identities; self._test_results = {}; self._tested_source = self.proxy_source()
+   self.proxy_test_button.setEnabled(False); self.proxy_assign_button.setEnabled(False)
+   self.proxy_status.setText("Proxyler test ediliyor..."); self.refresh_proxy_mapping()
+   worker = ProxyTestWorker(identities, self); self.proxy_test_worker = worker
+   worker.row_result.connect(self.handle_proxy_result); worker.completed.connect(self.proxy_test_finished)
+   worker.failed.connect(self.proxy_test_failed); worker.finished.connect(lambda: self.proxy_test_button.setEnabled(True))
+   worker.start()
+  except Exception as exc:
+   QMessageBox.critical(self, "Proxy test hatası", str(exc))
 
  def proxy_test_finished(self) -> None:
-  self.proxy_test_button.setEnabled(True); profiles=self.account_names(); required=min(len(profiles),len(self._tested_identities))
-  passed_required=required==len(profiles) and all(self._test_results.get(i) and self._test_results[i].ok for i in range(required))
-  passed_total=sum(1 for r in self._test_results.values() if r.ok); self.proxy_assign_button.setEnabled(bool(profiles) and passed_required)
-  failed=[f"{i+1}: {r.detail}" for i,r in self._test_results.items() if not r.ok]
-  message=f"Test bitti: {passed_total}/{len(self._tested_identities)} proxy aktif. "
-  message += "Atamaya hazır." if passed_required else "Her hesap için sırasındaki proxy testi geçmeli."
-  if failed: message += " Başarısız: " + " | ".join(failed)
-  self.proxy_status.setText(message); self.refresh_proxy_mapping()
+  profiles = guide_profiles(self)
+  passed = [index for index, result in sorted(self._test_results.items()) if result.ok]
+  ready = len(passed) >= len(profiles) and self._tested_source == self.proxy_source()
+  self.proxy_assign_button.setEnabled(ready)
+  self.proxy_status.setText(
+   f"Test bitti: {len(passed)}/{len(self._tested_identities)} geçti. "
+   + (f"{len(profiles)} Guide profiline atamaya hazır." if ready else f"{len(profiles)} profil için yeterli geçen proxy yok.")
+  )
+  self.refresh_proxy_mapping()
 
- def proxy_test_failed(self,detail) -> None:
-  self.proxy_test_button.setEnabled(True); self.proxy_assign_button.setEnabled(False); self.proxy_status.setText("Proxy testi tamamlanamadı: "+detail)
+ def proxy_test_failed(self, detail: str) -> None:
+  self.proxy_assign_button.setEnabled(False); self.proxy_status.setText(f"Proxy testi tamamlanamadı: {detail}")
 
  def assign_proxy_list(self) -> None:
   try:
-   if self.proxy_source()!=self._tested_source: raise RuntimeError("Liste testten sonra değişti. Yeniden test edin.")
-   profiles=self.account_names()
-   if not profiles: raise RuntimeError("Önce en az bir hesap ekleyin.")
-   if len(self._tested_identities)<len(profiles): raise RuntimeError(f"{len(profiles)} hesap için en az {len(profiles)} proxy gerekli.")
-   for index in range(len(profiles)):
-    result=self._test_results.get(index)
-    if not result or not result.ok: raise RuntimeError(f"{index+1}. proxy aktif değil veya testi geçmedi: {result.detail if result else 'test yok'}")
-   assignments=network_identity.assign_in_order(profiles,self._tested_identities); self.refresh_proxy_mapping()
-   self.proxy_status.setText(f"{len(assignments)} hesap sırayla sabit proxyye bağlandı.")
-   QMessageBox.information(self,"Proxy ataması tamamlandı",f"{len(assignments)} hesap için test edilmiş proxy atandı.")
-  except Exception as exc: QMessageBox.critical(self,"Proxy atama hatası",str(exc))
+   if self._tested_source != self.proxy_source():
+    raise RuntimeError("Liste testten sonra değişti. Yeniden test edin.")
+   profiles = guide_profiles(self)
+   if not profiles:
+    raise RuntimeError("Guide + Profiller sekmesinde atanacak profil yok")
+   passed_identities = [
+    self._tested_identities[index]
+    for index, result in sorted(self._test_results.items())
+    if result.ok
+   ]
+   if len(passed_identities) < len(profiles):
+    raise RuntimeError(f"{len(profiles)} Guide profili var ama yalnız {len(passed_identities)} proxy testi geçti")
+   assignments = network_identity.assign_in_order(profiles, passed_identities[:len(profiles)])
+   self.refresh_proxy_mapping()
+   try:
+    import publishing_flow_gui
+    if hasattr(self, "publish_profiles_table"):
+     publishing_flow_gui.refresh_table(self)
+     self.tabs.setCurrentWidget(self.guide_profiles_page)
+     mapping = ", ".join(f"{profile}={identity.server}" for profile, identity in assignments)
+     self.publish_status.setText(f"Proxy ataması hazır: {mapping}")
+   except Exception as exc:
+    raise RuntimeError(f"Proxyler kaydedildi fakat Guide tablosu yenilenemedi: {exc}") from exc
+   self.proxy_status.setText(f"{len(assignments)} proxy Guide + Profiller sırasına göre atandı.")
+   QMessageBox.information(self, "Proxy ataması tamamlandı", f"{len(assignments)} proxy Guide + Profiller sırasına göre atandı.")
+  except Exception as exc:
+   QMessageBox.critical(self, "Proxy atama hatası", str(exc))
 
  def clear_all_proxy_assignments(self) -> None:
-  for profile in self.account_names(): network_identity.delete(profile)
-  self._tested_identities=[]; self._test_results={}; self._tested_source=""; self.proxy_assign_button.setEnabled(False)
-  self.refresh_proxy_mapping(); self.proxy_status.setText("Tüm hesaplar doğrudan bağlantıya döndürüldü.")
+  profiles = guide_profiles(self)
+  for profile in profiles: network_identity.delete(profile)
+  self.refresh_proxy_mapping()
+  try:
+   import publishing_flow_gui
+   if hasattr(self, "publish_profiles_table"): publishing_flow_gui.refresh_table(self)
+  except Exception: pass
+  self.proxy_status.setText("Guide profillerindeki tüm proxy atamaları kaldırıldı")
 
- def build_ui(self) -> None:
-  original_build(self); self.network_identity_page=self.network_tab(); self.tabs.addTab(self.network_identity_page,"Proxy Listesi"); self.refresh_proxy_mapping()
- def refresh(self) -> None:
+ def build_ui(self):
+  original_build(self); self.network_identity_page = network_tab(self)
+  self.tabs.addTab(self.network_identity_page, "Proxy Listesi"); self.refresh_proxy_mapping()
+
+ def refresh(self):
   original_refresh(self)
-  if hasattr(self,"proxy_mapping"): self.refresh_proxy_mapping()
+  if hasattr(self, "proxy_mapping"): self.refresh_proxy_mapping()
 
- for name,value in {"build_ui":build_ui,"refresh":refresh,"account_names":account_names,"network_tab":network_tab,
-  "proxy_source":proxy_source,"proxy_input_changed":proxy_input_changed,"refresh_proxy_mapping":refresh_proxy_mapping,
-  "handle_proxy_result":handle_proxy_result,"test_proxy_list":test_proxy_list,"proxy_test_finished":proxy_test_finished,
-  "proxy_test_failed":proxy_test_failed,"assign_proxy_list":assign_proxy_list,"clear_all_proxy_assignments":clear_all_proxy_assignments}.items():
-  setattr(window_class,name,value)
- window_class._network_identity_gui_installed=True
+ for name, value in {
+  "network_tab": network_tab, "proxy_source": proxy_source,
+  "proxy_input_changed": proxy_input_changed, "refresh_proxy_mapping": refresh_proxy_mapping,
+  "handle_proxy_result": handle_proxy_result, "test_proxy_list": test_proxy_list,
+  "proxy_test_finished": proxy_test_finished, "proxy_test_failed": proxy_test_failed,
+  "assign_proxy_list": assign_proxy_list, "clear_all_proxy_assignments": clear_all_proxy_assignments,
+  "build_ui": build_ui, "refresh": refresh,
+ }.items(): setattr(window_class, name, value)
+ window_class._network_identity_gui_installed = True
