@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from platformdirs import user_data_dir
 UTC = timezone.utc
 DATA_DIR = Path(user_data_dir("signaldesk-studio", "SignalDesk"))
 AUDIT_FILE = DATA_DIR / "publication_audit.json"
+_AUDIT_LOCK = threading.RLock()
 
 
 class PreflightError(RuntimeError):
@@ -80,15 +82,22 @@ def inspect_media(path: Path) -> MediaReport:
     width, height = int(video.get("width") or 0), int(video.get("height") or 0)
     codec, pixel = str(video.get("codec_name") or ""), str(video.get("pix_fmt") or "")
     fps = _rate(str(video.get("avg_frame_rate") or "0/1"))
-    hard_errors = []
-    warnings = []
-    if duration < 1.0: hard_errors.append("video 1 saniyeden kısa")
-    if min(width, height) < 720: hard_errors.append("kısa kenar 720 pikselin altında")
-    if codec not in {"h264", "hevc"}: hard_errors.append(f"video codec destek dışı: {codec}")
-    if pixel not in {"yuv420p", "yuvj420p"}: hard_errors.append(f"pixel format riskli: {pixel}")
-    if not 23.0 <= fps <= 61.0: hard_errors.append(f"frame rate riskli: {fps:.2f}")
-    if audio is None: warnings.append("ses stream yok")
-    elif str(audio.get("codec_name") or "") != "aac": warnings.append("audio codec AAC değil")
+    hard_errors: list[str] = []
+    warnings: list[str] = []
+    if duration < 1.0:
+        hard_errors.append("video 1 saniyeden kısa")
+    if min(width, height) < 720:
+        hard_errors.append("kısa kenar 720 pikselin altında")
+    if codec not in {"h264", "hevc"}:
+        hard_errors.append(f"video codec destek dışı: {codec}")
+    if pixel not in {"yuv420p", "yuvj420p"}:
+        hard_errors.append(f"pixel format riskli: {pixel}")
+    if not 23.0 <= fps <= 61.0:
+        hard_errors.append(f"frame rate riskli: {fps:.2f}")
+    if audio is None:
+        warnings.append("ses stream yok")
+    elif str(audio.get("codec_name") or "") != "aac":
+        warnings.append("audio codec AAC değil")
     if hard_errors:
         raise PreflightError("Medya preflight başarısız: " + "; ".join(hard_errors))
     return MediaReport(
@@ -98,12 +107,17 @@ def inspect_media(path: Path) -> MediaReport:
     )
 
 
-def _load_audit() -> list[dict]:
+def _load_audit_unlocked() -> list[dict]:
     try:
         data = json.loads(AUDIT_FILE.read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
     except (OSError, json.JSONDecodeError):
         return []
+
+
+def _load_audit() -> list[dict]:
+    with _AUDIT_LOCK:
+        return list(_load_audit_unlocked())
 
 
 def validate(profile: str, video: Path, caption: str) -> MediaReport:
@@ -118,19 +132,23 @@ def validate(profile: str, video: Path, caption: str) -> MediaReport:
             created = datetime.fromisoformat(str(item.get("created_at", "")).replace("Z", "+00:00"))
         except ValueError:
             continue
-        if (created >= cutoff and item.get("profile") == profile
-                and item.get("sha256") == report.sha256):
+        if created >= cutoff and item.get("profile") == profile and item.get("sha256") == report.sha256:
             raise PreflightError("Aynı dosya bu profilde son 30 gün içinde zaten yayınlanmış")
     return report
 
 
 def record(profile: str, report: MediaReport, result: str = "published") -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    items = _load_audit()
-    payload = asdict(report)
-    payload["warnings"] = list(report.warnings)
-    items.append({**payload, "profile": profile, "result": result,
-                  "created_at": datetime.now(UTC).isoformat()})
-    temporary = AUDIT_FILE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(items[-1000:], ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(AUDIT_FILE)
+    with _AUDIT_LOCK:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        items = _load_audit_unlocked()
+        payload = asdict(report)
+        payload["warnings"] = list(report.warnings)
+        items.append({
+            **payload, "profile": profile, "result": result,
+            "created_at": datetime.now(UTC).isoformat(),
+        })
+        temporary = AUDIT_FILE.with_suffix(AUDIT_FILE.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(items[-1000:], ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(AUDIT_FILE)
