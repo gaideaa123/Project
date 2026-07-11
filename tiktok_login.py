@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-"""Profile-scoped TikTok session, onboarding, and publish-dialog assistance."""
+"""Low-risk profile-scoped TikTok web assistance.
+
+The application may prepare a video and caption in visible Chrome, but it does
+not inject session cookies or click the final Publish control. The operator uses
+TikTok's normal UI for login, audience review, content checks and publication.
+"""
 
 import re
 import threading
@@ -10,7 +15,6 @@ from typing import Any
 import keyring
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 
-import copyright_dialog
 import preflight_hook
 import tiktok_overlays
 
@@ -41,6 +45,7 @@ def _session_value(raw):
 
 
 def save_session(profile, value):
+    """Retain existing UI compatibility; assisted mode never injects this value."""
     keyring.set_password(SERVICE, _key(profile, "sessionid"), _session_value(value))
 
 
@@ -106,26 +111,25 @@ def file_input_ready(page) -> bool:
 
 
 def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
+    """Wait for a normal interactive login in the persistent Chrome profile."""
     deadline = time.monotonic() + timeout_seconds
-    identity, password = load_credentials(profile)
-    attempted = False
+    login_reported = False
     last_navigation = 0.0
     while time.monotonic() < deadline:
         if page.is_closed():
             raise LoginError("TikTok penceresi kapatıldı")
         if file_input_ready(page):
             if status:
-                status("TikTok oturumu doğrulandı; upload hazır")
+                status("Normal Chrome oturumu hazır; upload ekranı açıldı")
             return
         url = page.url.lower()
         now = time.monotonic()
         if "/login" in url or _visible(page.locator('input[type="password"]')):
-            if identity and password and not attempted:
-                attempted = True
-                if status:
-                    status("Session geçersiz; kayıtlı hesapla görünür giriş gerekiyor")
-                page.bring_to_front()
-                page.wait_for_timeout(1000)
+            if not login_reported and status:
+                status(f"{profile}: TikTok girişini Chrome içinde normal şekilde tamamlayın")
+            login_reported = True
+            page.bring_to_front()
+            page.wait_for_timeout(750)
             continue
         if "tiktokstudio/upload" not in url and now - last_navigation > 4:
             try:
@@ -135,39 +139,19 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
             last_navigation = now
             continue
         page.wait_for_timeout(750)
-    raise LoginError("TikTok session/giriş doğrulaması tamamlanmadı")
-
-
-def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool:
-    return copyright_dialog.handle(page, timeout_seconds)
+    raise LoginError("TikTok giriş/upload ekranı 15 dakikada hazır olmadı")
 
 
 def install(web_uploader: Any):
-    """Install once; serialize temporary module-level wrappers per profile."""
+    """Install assisted mode without stealth patches or cookie injection."""
     with _INSTALL_LOCK:
         if getattr(web_uploader, "_signaldesk_login_installed", False):
             preflight_hook.install(web_uploader)
             return
-        original_launch = web_uploader.launch_context
+
         original_prepare = web_uploader.prepare_upload
-        original_confirm = web_uploader.confirm_publish_dialog
         original_notice = web_uploader.dismiss_pre_caption_notice
         web_uploader.file_input_ready = file_input_ready
-
-        def launch(playwright, profile):
-            context = original_launch(playwright, profile)
-            session_id = load_session(profile)
-            if session_id:
-                context.add_cookies([{
-                    "name": "sessionid", "value": session_id, "domain": ".tiktok.com",
-                    "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
-                }])
-            return context
-
-        def confirm_for_every_profile(page):
-            if handle_copyright_publish_dialog(page):
-                return
-            original_confirm(page)
 
         def dismiss_pre_caption_notice(page, status=None, timeout_seconds=45, optional_after_seconds=8):
             tiktok_overlays.clear_new_account_overlays(
@@ -183,11 +167,9 @@ def install(web_uploader: Any):
             return result
 
         def prepare(request, publish=False, approval=None, status=None):
-            # app_tr is sequential today. The lock also prevents accidental future
-            # parallel calls from exchanging profile-specific waiter functions.
+            # Serialize profiles and replace only the login waiter temporarily.
             with _INSTALL_LOCK:
                 original_wait = web_uploader.wait_for_upload_after_login
-                previous_confirm = web_uploader.confirm_publish_dialog
 
                 def waiter(page, timeout_seconds=900, status=None):
                     result = wait_for_upload_after_login(
@@ -199,20 +181,23 @@ def install(web_uploader: Any):
                     return result
 
                 web_uploader.wait_for_upload_after_login = waiter
-                web_uploader.confirm_publish_dialog = confirm_for_every_profile
                 if status:
-                    status(f"{request.profile}: içerik kontrolü açık, telif onayı etkin")
+                    status(
+                        f"{request.profile}: düşük riskli mod. Video ve caption hazırlanacak; "
+                        "görünürlük ve Yayınla işlemini Chrome'da siz tamamlayın, sonra pencereyi kapatın."
+                    )
                 try:
+                    # publish=False is intentional. The visible browser remains open,
+                    # allowing a normal human final review and click. Closing it moves
+                    # the existing sequential worker to the next account.
                     return original_prepare(
-                        request, publish=publish, approval=approval, status=status
+                        request, publish=False, approval=None, status=status
                     )
                 finally:
                     web_uploader.wait_for_upload_after_login = original_wait
-                    web_uploader.confirm_publish_dialog = previous_confirm
 
-        web_uploader.launch_context = launch
-        web_uploader.confirm_publish_dialog = confirm_for_every_profile
         web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
         web_uploader.prepare_upload = prepare
         web_uploader._signaldesk_login_installed = True
+        web_uploader._signaldesk_assisted_mode = True
         preflight_hook.install(web_uploader)
