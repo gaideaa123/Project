@@ -1,104 +1,166 @@
 from __future__ import annotations
 
-"""Stable one-proxy-per-profile identity with assignment and health locks."""
+"""Stable, operator-provided network identity per account.
 
-import hashlib
-import json
+Each account is bound to one fixed proxy and keeps that assignment across runs.
+Credentials are stored in the operating-system keychain, never in project files.
+"""
+
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import keyring
-from platformdirs import user_data_dir
-
-import proxy_health
 
 SERVICE = "signaldesk-profile-network"
-DATA_DIR = Path(user_data_dir("signaldesk-profile-network", "SignalDesk"))
-BINDINGS = DATA_DIR / "proxy-bindings.json"
 ALLOWED_SCHEMES = {"http", "https", "socks5"}
 
 
-class NetworkIdentityError(RuntimeError): pass
+class NetworkIdentityError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
 class NetworkIdentity:
-    server: str = ""; username: str = ""; password: str = ""
-    def validate(self):
-        if not self.server: return
+    server: str = ""
+    username: str = ""
+    password: str = ""
+
+    def validate(self) -> None:
+        if not self.server:
+            return
         parsed = urlparse(self.server)
-        if parsed.scheme.casefold() not in ALLOWED_SCHEMES: raise NetworkIdentityError("Proxy http, https veya socks5 olmalı")
-        if not parsed.hostname or not parsed.port: raise NetworkIdentityError("Proxy host ve port içermeli")
-        if parsed.username or parsed.password: raise NetworkIdentityError("Credential değerlerini URL içine gömmeyin")
-        if bool(self.username) != bool(self.password): raise NetworkIdentityError("Kullanıcı ve parola birlikte girilmeli")
-    def playwright_proxy(self):
+        if parsed.scheme.casefold() not in ALLOWED_SCHEMES:
+            raise NetworkIdentityError("Proxy http, https veya socks5 olmalı")
+        if not parsed.hostname or not parsed.port:
+            raise NetworkIdentityError("Proxy host ve port içermeli")
+        if parsed.username or parsed.password:
+            raise NetworkIdentityError("Kullanıcı/parolayı proxy URL içine gömmeyin")
+        if bool(self.username) != bool(self.password):
+            raise NetworkIdentityError("Proxy kullanıcı adı ve parolası birlikte girilmeli")
+
+    def playwright_proxy(self) -> dict[str, str] | None:
         self.validate()
-        if not self.server: return None
+        if not self.server:
+            return None
         value = {"server": self.server}
-        if self.username: value.update(username=self.username, password=self.password)
+        if self.username:
+            value["username"] = self.username
+            value["password"] = self.password
         return value
 
 
-def parse_proxy_line(value, default_scheme="http"):
-    raw=value.strip(); scheme=default_scheme
-    if not raw: raise NetworkIdentityError("Boş proxy satırı")
-    if "://" in raw: scheme,raw=raw.split("://",1)
-    parts=raw.split(":",3)
-    if len(parts) not in {2,4}: raise NetworkIdentityError("Format host:port veya host:port:kullanıcı:parola olmalı")
-    host,port=parts[0].strip(),parts[1].strip()
-    if scheme not in ALLOWED_SCHEMES or not host or not port.isdigit() or not 1<=int(port)<=65535: raise NetworkIdentityError("Proxy tipi/host/port geçersiz")
-    user,password=(parts[2],parts[3]) if len(parts)==4 else ("","")
-    result=NetworkIdentity(f"{scheme}://{host}:{port}",user,password); result.validate(); return result
+def parse_proxy_line(value: str, default_scheme: str = "http") -> NetworkIdentity:
+    """Parse host:port:user:pass or scheme://host:port:user:pass."""
+    raw = value.strip()
+    if not raw:
+        raise NetworkIdentityError("Boş proxy satırı")
+    scheme = default_scheme.strip().casefold()
+    if "://" in raw:
+        scheme, raw = raw.split("://", 1)
+        scheme = scheme.casefold()
+    if scheme not in ALLOWED_SCHEMES:
+        raise NetworkIdentityError(f"Desteklenmeyen proxy tipi: {scheme}")
+    parts = raw.split(":", 3)
+    if len(parts) not in {2, 4}:
+        raise NetworkIdentityError(
+            "Proxy formatı host:port veya host:port:kullanıcı:parola olmalı"
+        )
+    host, port = parts[0].strip(), parts[1].strip()
+    if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise NetworkIdentityError("Proxy host/port geçersiz")
+    username, password = (parts[2].strip(), parts[3]) if len(parts) == 4 else ("", "")
+    if len(parts) == 4 and (not username or not password):
+        raise NetworkIdentityError("Proxy kullanıcı adı ve parolası boş olamaz")
+    identity = NetworkIdentity(f"{scheme}://{host}:{port}", username, password)
+    identity.validate()
+    return identity
 
 
-def parse_proxy_list(value, default_scheme="http"):
-    rows=[]
-    for number,line in enumerate(value.splitlines(),1):
-        if not line.strip() or line.strip().startswith("#"): continue
-        try: rows.append(parse_proxy_line(line,default_scheme))
-        except Exception as exc: raise NetworkIdentityError(f"Satır {number}: {exc}") from exc
-    if not rows: raise NetworkIdentityError("En az bir proxy girin")
-    if len({r.server for r in rows}) != len(rows): raise NetworkIdentityError("Aynı proxy iki kez kullanılamaz")
-    return rows
+def parse_proxy_list(value: str, default_scheme: str = "http") -> list[NetworkIdentity]:
+    identities: list[NetworkIdentity] = []
+    for line_number, line in enumerate(value.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            identities.append(parse_proxy_line(stripped, default_scheme))
+        except NetworkIdentityError as exc:
+            raise NetworkIdentityError(f"Satır {line_number}: {exc}") from exc
+    if not identities:
+        raise NetworkIdentityError("En az bir proxy girin")
+    endpoints = [(item.server.casefold(), item.username) for item in identities]
+    if len(endpoints) != len(set(endpoints)):
+        raise NetworkIdentityError("Aynı proxy listede birden fazla kez kullanılamaz")
+    return identities
 
 
-def _key(profile,field): return f"{'-'.join(profile.strip().split()).casefold()}:{field}"
-def _binding_id(identity): return hashlib.sha256(f"{identity.server}|{identity.username}".encode()).hexdigest()
-def _bindings():
+def proxy_url(identity: NetworkIdentity) -> str:
+    identity.validate()
+    if not identity.server:
+        return ""
+    parsed = urlparse(identity.server)
+    auth = ""
+    if identity.username:
+        auth = f"{quote(identity.username, safe='')}:{quote(identity.password, safe='')}@"
+    return f"{parsed.scheme}://{auth}{parsed.hostname}:{parsed.port}"
+
+
+def requests_proxies(identity: NetworkIdentity) -> dict[str, str] | None:
+    value = proxy_url(identity)
+    return {"http": value, "https": value} if value else None
+
+
+def _profile_key(profile: str, field: str) -> str:
+    clean = "-".join(profile.strip().split()).casefold()
+    if not clean:
+        raise NetworkIdentityError("Profil adı boş")
+    return f"{clean}:{field}"
+
+
+def load(profile: str) -> NetworkIdentity:
     try:
-        data=json.loads(BINDINGS.read_text(encoding="utf-8")); return data if isinstance(data,dict) else {}
-    except Exception: return {}
+        return NetworkIdentity(
+            keyring.get_password(SERVICE, _profile_key(profile, "server")) or "",
+            keyring.get_password(SERVICE, _profile_key(profile, "username")) or "",
+            keyring.get_password(SERVICE, _profile_key(profile, "password")) or "",
+        )
+    except Exception:
+        return NetworkIdentity()
 
-def _write_bindings(data):
-    DATA_DIR.mkdir(parents=True,exist_ok=True); temp=BINDINGS.with_suffix(".tmp"); temp.write_text(json.dumps(data,indent=2),encoding="utf-8"); temp.replace(BINDINGS)
 
-def load(profile):
-    try: return NetworkIdentity(keyring.get_password(SERVICE,_key(profile,"server")) or "",keyring.get_password(SERVICE,_key(profile,"username")) or "",keyring.get_password(SERVICE,_key(profile,"password")) or "")
-    except Exception: return NetworkIdentity()
+def save(profile: str, identity: NetworkIdentity) -> None:
+    identity.validate()
+    if not identity.server:
+        delete(profile)
+        return
+    keyring.set_password(SERVICE, _profile_key(profile, "server"), identity.server)
+    keyring.set_password(SERVICE, _profile_key(profile, "username"), identity.username)
+    keyring.set_password(SERVICE, _profile_key(profile, "password"), identity.password)
 
-def save(profile,identity):
-    identity.validate(); data=_bindings(); old=data.get(profile.casefold()); new=_binding_id(identity) if identity.server else ""
-    if old and old != new: raise NetworkIdentityError(f"{profile} başka bir proxyye kilitli. Önce atamayı açıkça kaldırın.")
-    if not identity.server: delete(profile); return
-    keyring.set_password(SERVICE,_key(profile,"server"),identity.server); keyring.set_password(SERVICE,_key(profile,"username"),identity.username); keyring.set_password(SERVICE,_key(profile,"password"),identity.password)
-    data[profile.casefold()]=new; _write_bindings(data)
 
-def assign_in_order(profiles,identities):
-    if not profiles: raise NetworkIdentityError("Proxy atanacak hesap yok")
-    if len(identities)<len(profiles): raise NetworkIdentityError(f"{len(profiles)} hesap için en az {len(profiles)} proxy gerekli")
-    for identity in identities[:len(profiles)]: proxy_health.require_healthy(identity)
-    result=list(zip(profiles,identities,strict=False))
-    for profile,identity in result: save(profile,identity)
-    return result
+def assign_in_order(
+    profiles: list[str], identities: list[NetworkIdentity]
+) -> list[tuple[str, NetworkIdentity]]:
+    if not profiles:
+        raise NetworkIdentityError("Proxy atanacak hesap yok")
+    if len(identities) < len(profiles):
+        raise NetworkIdentityError(
+            f"{len(profiles)} hesap var ama {len(identities)} proxy girildi. "
+            "Her hesap için bir proxy gerekli."
+        )
+    assignments = list(zip(profiles, identities, strict=False))
+    for profile, identity in assignments:
+        save(profile, identity)
+    return assignments
 
-def delete(profile):
-    for field in ("server","username","password"):
-        try: keyring.delete_password(SERVICE,_key(profile,field))
-        except Exception: pass
-    data=_bindings(); data.pop(profile.casefold(),None); _write_bindings(data)
 
-def proxy_for(profile):
-    identity=load(profile)
-    if identity.server: proxy_health.require_healthy(identity)
-    return identity.playwright_proxy()
+def delete(profile: str) -> None:
+    for field in ("server", "username", "password"):
+        try:
+            keyring.delete_password(SERVICE, _profile_key(profile, field))
+        except Exception:
+            pass
+
+
+def proxy_for(profile: str) -> dict[str, str] | None:
+    return load(profile).playwright_proxy()
