@@ -27,7 +27,7 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Compile production modules
         run: |
-          python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py
+          python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py sitecustomize.py
           python -m py_compile oauth_helper.py media_qa.py
           python -m py_compile antibot_resilience.py antibot_sandbox.py
           python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
@@ -39,6 +39,8 @@ jobs:
           python network_identity_smoke.py
           python risk_controls_smoke.py
           python -c "import app_tr, proxy_publisher; assert hasattr(app_tr, 'TurkceAnaPencere')"
+      - name: App TR layout startup smoke
+        run: python layout_compat_smoke.py
       - name: Core GUI smoke
         run: python smoke_test.py
       - name: Preflight smoke
