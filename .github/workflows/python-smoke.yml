@@ -31,6 +31,7 @@ jobs:
           python -m py_compile antibot_resilience.py antibot_sandbox.py
           python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
           python -m py_compile utils/antibot_resilience.py utils/network_identity.py
+          python -m py_compile playwright_interactions.py user_assisted_playwright.py
       - name: Core GUI smoke
         run: python smoke_test.py
       - name: Preflight smoke
@@ -40,4 +41,6 @@ jobs:
       - name: Defensive resilience smoke
         run: python antibot_resilience_smoke.py
       - name: Assisted interaction unit tests
-        run: python -m unittest -v test_human_interactions.py
+        run: |
+          python -m unittest -v test_human_interactions.py
+          python -m unittest -v test_user_assisted_playwright.py
