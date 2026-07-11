@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
  QVBoxLayout, QWidget,
 )
 
+import direct_connection_policy
 import tiktok_login
 
 try:
@@ -93,4 +94,5 @@ def install(window:Any) -> None:
  if getattr(window,"_session_account_gui_installed",False):return
  window.session_accounts_page=session_page(window); window.tabs.insertTab(1,window.session_accounts_page,"Session ID Hesapları"); window._session_account_gui_installed=True; refresh_session_accounts(window)
  import publishing_flow_gui
+ direct_connection_policy.install(publishing_flow_gui)
  publishing_flow_gui.install(window)
