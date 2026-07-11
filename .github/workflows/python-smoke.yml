@@ -17,13 +17,25 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
-      - run: python -m compileall -q .
-      - run: python runtime_contract_smoke.py
-      - run: python assisted_mode_smoke.py
-      - run: python smoke_test.py
-      - run: python preflight_smoke.py
-      - run: python media_qa_smoke.py
-      - run: python antibot_resilience_smoke.py
-      - run: python antibot_sandbox_smoke.py
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile every Python module
+        run: python -m compileall -q .
+      - name: Runtime contracts
+        run: python runtime_contract_smoke.py
+      - name: Session bootstrap behavior
+        run: python assisted_mode_smoke.py
+      - name: Session unit tests
+        run: python session_publish_unit_tests.py
+      - name: Main GUI smoke
+        run: python smoke_test.py
+      - name: Preflight and audit smoke
+        run: python preflight_smoke.py
+      - name: Media QA smoke
+        run: python media_qa_smoke.py
+      - name: Anti-bot resilience smoke
+        run: python antibot_resilience_smoke.py
+      - name: Local sandbox smoke
+        run: python antibot_sandbox_smoke.py

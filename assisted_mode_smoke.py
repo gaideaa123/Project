@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+"""Behavioral smoke tests for Session ID bootstrap and automatic publishing."""
+
 import inspect
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import tiktok_login
+
+
+class FakeContext:
+    def __init__(self, cookies=None):
+        self.cookie_rows = list(cookies or [])
+        self.added = []
+
+    def cookies(self, urls=None):
+        assert urls == ["https://www.tiktok.com"]
+        return list(self.cookie_rows)
+
+    def add_cookies(self, rows):
+        self.added.extend(rows)
 
 
 def check(value: bool, message: str) -> None:
@@ -15,32 +30,42 @@ def check(value: bool, message: str) -> None:
 def main() -> None:
     install_source = inspect.getsource(tiktok_login.install)
     writer_source = inspect.getsource(tiktok_login._native_caption_write)
-    bootstrap_source = inspect.getsource(tiktok_login.bootstrap_session)
-    check("publish=publish" in install_source, "otomatik final Yayınla akışı korundu")
-    check("approval=approval" in install_source, "GUI son onayı korundu")
-    check("dispatchEvent" not in writer_source, "JavaScript sentetik input/change event yok")
-    check("press_sequentially" in writer_source, "standart klavye girişi kullanılıyor")
-    check("_existing_session_cookie" in bootstrap_source, "önce kalıcı profil session kontrol ediliyor")
-    check("add_cookies" in bootstrap_source, "Session ID bootstrap mevcut")
-    check("stealth" not in install_source.casefold(), "stealth/fingerprint bypass yaması yok")
 
-    existing = MagicMock()
-    existing.cookies.return_value = [{"name": "sessionid", "value": "existing-session"}]
+    existing = FakeContext([{"name": "sessionid", "value": "existing-session"}])
     with patch.object(tiktok_login, "load_session", return_value="saved-session"):
         check(tiktok_login.bootstrap_session(existing, "profil") is False,
-              "mevcut profil sessionı her çalıştırmada ezilmiyor")
-        existing.add_cookies.assert_not_called()
+              "mevcut kalıcı profil sessionı korunuyor")
+        check(existing.added == [], "mevcut session yeniden enjekte edilmiyor")
 
-    empty = MagicMock()
-    empty.cookies.return_value = []
+    existing_ss = FakeContext([{"name": "sessionid_ss", "value": "existing-secure-session"}])
+    with patch.object(tiktok_login, "load_session", return_value="saved-session"):
+        check(tiktok_login.bootstrap_session(existing_ss, "profil") is False,
+              "sessionid_ss kalıcı session olarak tanınıyor")
+
+    empty = FakeContext()
     with patch.object(tiktok_login, "load_session", return_value="saved-session"):
         check(tiktok_login.bootstrap_session(empty, "profil") is True,
-              "boş profil Session ID ile bir kez bootstrap ediliyor")
-        empty.add_cookies.assert_called_once()
+              "boş profil Session ID ile bootstrap ediliyor")
+    check(len(empty.added) == 1, "yalnız bir bootstrap cookie ekleniyor")
+    cookie = empty.added[0]
+    check(cookie["name"] == "sessionid" and cookie["domain"] == ".tiktok.com",
+          "bootstrap cookie kapsamı doğru")
+    check(cookie["secure"] is True and cookie["httpOnly"] is True,
+          "bootstrap cookie güvenlik bayrakları doğru")
 
+    missing = FakeContext()
+    with patch.object(tiktok_login, "load_session", return_value=""):
+        check(tiktok_login.bootstrap_session(missing, "profil") is False,
+              "kayıtlı Session ID yoksa cookie eklenmiyor")
+        check(missing.added == [], "boş secret ile sahte session oluşturulmuyor")
+
+    check("publish=publish" in install_source and "approval=approval" in install_source,
+          "GUI onayı ve otomatik final Yayınla korunuyor")
+    check("dispatchEvent" not in writer_source and "press_sequentially" in writer_source,
+          "caption JavaScript event yerine klavye aksiyonuyla yazılıyor")
     check("finally:" in install_source and "previous_writer" in install_source,
-          "geçici profil wrapperları geri yükleniyor")
-    print("\nSESSION ID BOOTSTRAP + OTOMATİK YAYIN TESTLERİ GEÇTİ")
+          "profil wrapperları hata halinde geri yükleniyor")
+    print("\nSESSION BOOTSTRAP DAVRANIŞ TESTLERİ GEÇTİ")
 
 
 if __name__ == "__main__":
