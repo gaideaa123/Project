@@ -6,7 +6,7 @@ $files = @(
  "app.py", "app_tr.py", "run_tr.py", "run_one_click.py", "one_click_tr.py",
  "oauth_helper.py", "web_uploader.py", "web_upload_engine.py", "web_gui_integration.py", "auto_publish_flow.py",
  "tiktok_login.py", "tiktok_overlays.py", "copyright_dialog.py", "copyright_policy.py",
- "preflight_hook.py", "content_preflight.py", "video_variants.py", "uniquizer_tab.py",
+ "preflight_hook.py", "content_preflight.py", "video_variants.py", "originality_qa.py", "uniquizer_tab.py",
  "session_gui.py", "session_account_gui.py", "publishing_flow_gui.py", "direct_connection_policy.py", "target_reachability.py", "sitecustomize.py",
  "media_qa.py", "antibot_resilience.py", "antibot_sandbox.py", "network_identity.py",
  "network_identity_gui.py", "proxy_health.py", "proxy_publisher.py", "socks_bridge.py",
@@ -14,7 +14,7 @@ $files = @(
  "antibot_sandbox_smoke.py", "runtime_contract_smoke.py", "feature_presence_contract_test.py",
  "publish_flow_contract_test.py", "proxy_web_inheritance_test.py", "socks5_proxy_test.py",
  "socks5_health_bridge_test.py", "guide_proxy_assignment_test.py", "direct_connection_policy_test.py", "target_reachability_test.py",
- "session_publish_unit_tests.py", "content_check_overlay_test.py", "auto_publish_flow_test.py", "updater_contract_test.py",
+ "session_publish_unit_tests.py", "content_check_overlay_test.py", "originality_qa_test.py", "auto_publish_flow_test.py", "updater_contract_test.py",
  "README.md", "TURKCE_KURULUM.md", "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
 )
 $stage = Join-Path $env:TEMP ("signaldesk-update-" + [guid]::NewGuid().ToString("N"))
@@ -46,6 +46,8 @@ try {
  if ($LASTEXITCODE -ne 0) { throw "Session ID bootstrap testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "content_check_overlay_test.py")
  if ($LASTEXITCODE -ne 0) { throw "Icerik kontrolu Ac testi basarisiz" }
+ & $python (Join-Path $PSScriptRoot "originality_qa_test.py")
+ if ($LASTEXITCODE -ne 0) { throw "Ozgunluk QA testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "auto_publish_flow_test.py")
  if ($LASTEXITCODE -ne 0) { throw "Otomatik yayin akis testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "socks5_proxy_test.py")
