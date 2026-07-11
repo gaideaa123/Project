@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 import app as core
 import network_identity_gui
+import publishing_flow_gui
 from proxy_publisher import install_proxy_backend
 from uniquizer_tab import UniquizerTab
 
@@ -83,6 +84,10 @@ class TurkceAnaPencere(core.MainWindow):
   self.uniquizer_tab: UniquizerTab | None = None
   super().__init__()
   install_proxy_backend(self)
+  # Keep the profile mapping and automatic publishing flow explicitly wired
+  # into app_tr. install() is idempotent, so compatibility adapters can also
+  # call it without creating duplicate tabs or signal handlers.
+  publishing_flow_gui.install(self)
 
  def build_ui(self) -> None:
   super().build_ui()
@@ -135,6 +140,7 @@ class TurkceAnaPencere(core.MainWindow):
   self.output_dir.editingFinished.connect(self._normalize_output)
 
  def _uniquizer_outputs_ready(self, files: object) -> None:
+  """Compatibility fallback; publishing_flow_gui replaces this signal route."""
   outputs = [str(Path(value).resolve()) for value in list(files or [])]
   if not outputs:
    QMessageBox.critical(self, "Cold Open Uniquizer", "Uniquizer geçerli çıktı üretmedi.")
@@ -145,11 +151,6 @@ class TurkceAnaPencere(core.MainWindow):
    queue_field.setText(outputs[0])
   if hasattr(self, "log"):
    self.log(f"Cold Open Uniquizer: {len(outputs)} çıktı hazır")
-  QMessageBox.information(
-   self,
-   "Cold Open varyasyonları hazır",
-   f"{len(outputs)} video üretildi. İlk çıktı yayın alanına aktarıldı.",
-  )
 
  def api_sekmesi(self) -> QWidget:
   page = QWidget()
@@ -282,6 +283,8 @@ class TurkceAnaPencere(core.MainWindow):
       item = table.item(row, column)
       if item:
        item.setText(DURUM.get(item.text(), item.text()))
+  if hasattr(self, "publish_profiles_table"):
+   publishing_flow_gui.refresh_table(self)
 
  def _normalize_output(self) -> None:
   if self.output_dir.text().strip():
@@ -383,6 +386,17 @@ class TurkceAnaPencere(core.MainWindow):
    )
    event.ignore()
    return
+  publish_worker = getattr(self, "publish_worker", None)
+  if publish_worker is not None and publish_worker.isRunning():
+   publish_worker.cancel()
+   if not publish_worker.wait(5000):
+    QMessageBox.warning(
+     self,
+     "Yayın otomasyonu çalışıyor",
+     "Yayın otomasyonu güvenli biçimde durmadan pencere kapatılamaz.",
+    )
+    event.ignore()
+    return
   super().closeEvent(event)
 
 network_identity_gui.install(TurkceAnaPencere)
