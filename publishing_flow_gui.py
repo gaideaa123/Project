@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-"""Guide, visible profile/video/proxy assignment, and automatic web publishing."""
+"""Guide, explicit profile order, existing-variant import, and proxy publishing."""
 
 import inspect
+import json
 import random
 import re
 import threading
@@ -13,9 +14,9 @@ import keyring
 import requests
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
- QCheckBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
- QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
- QVBoxLayout, QWidget,
+ QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+ QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTableWidget,
+ QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 import network_identity
@@ -24,6 +25,8 @@ import tiktok_login
 import web_uploader
 
 SERVICE = "signaldesk-azure-gpt4o"
+PROFILE_ORDER_KEY = "profile_order"
+VARIANT_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 DEFAULT_GUIDE = (
  "Konu: Videonun gerçek konusuna uygun Türkçe TikTok açıklaması.\n"
  "Ton: doğal, merak uyandıran, samimi ve güvenilir.\n"
@@ -40,13 +43,39 @@ def secret(name: str, default: str = "") -> str:
 def save_secret(name: str, value: str) -> None:
  keyring.set_password(SERVICE, name, value)
 
-def profiles(window: Any) -> list[str]:
+def registry_profiles(window: Any) -> list[str]:
  state = window.registry.snapshot()
  return [
   str(row.get("name") or row.get("profile_name") or "").strip()
   for row in state.get("accounts", [])
   if str(row.get("name") or row.get("profile_name") or "").strip()
  ]
+
+def saved_profile_order(window: Any) -> list[str]:
+ cached = getattr(window, "_publish_profile_order", None)
+ if isinstance(cached, list):
+  return list(cached)
+ try:
+  value = json.loads(secret(PROFILE_ORDER_KEY, "[]"))
+  return [str(name) for name in value] if isinstance(value, list) else []
+ except (TypeError, ValueError, json.JSONDecodeError):
+  return []
+
+def profiles(window: Any) -> list[str]:
+ """Return current accounts in the user's persisted distribution order."""
+ current = registry_profiles(window)
+ saved = saved_profile_order(window)
+ ordered = [name for name in saved if name in current]
+ ordered.extend(name for name in current if name not in ordered)
+ window._publish_profile_order = ordered
+ return list(ordered)
+
+def save_profile_order(window: Any, names: list[str]) -> None:
+ current = registry_profiles(window)
+ if set(names) != set(current) or len(names) != len(current):
+  raise RuntimeError("Profil sırası güncel hesap listesiyle eşleşmiyor")
+ save_secret(PROFILE_ORDER_KEY, json.dumps(names, ensure_ascii=False))
+ window._publish_profile_order = list(names)
 
 def validated_proxy(profile: str) -> network_identity.NetworkIdentity:
  identity = network_identity.load(profile)
@@ -64,6 +93,31 @@ def validate_proxy_assignments(names: list[str]) -> dict[str, network_identity.N
  if not names:
   raise RuntimeError("Proxy doğrulanacak profil yok")
  return {name: validated_proxy(name) for name in names}
+
+def numbered_variants(folder: Path) -> list[Path]:
+ """Load 1.mp4, 2.mp4... in numeric order, never lexicographic order."""
+ folder = folder.expanduser().resolve()
+ if not folder.is_dir():
+  raise RuntimeError("Geçerli bir uniquize çıktı klasörü seçin")
+ indexed: dict[int, Path] = {}
+ for path in folder.iterdir():
+  if not path.is_file() or path.suffix.casefold() not in VARIANT_EXTENSIONS:
+   continue
+  if not path.stem.isdigit():
+   continue
+  index = int(path.stem)
+  if index < 1:
+   continue
+  if index in indexed:
+   raise RuntimeError(f"Aynı sıra numarası iki kez var: {index}")
+  indexed[index] = path.resolve()
+ if not indexed:
+  raise RuntimeError("Klasörde 1.mp4, 2.mp4 şeklinde numaralı varyasyon bulunamadı")
+ expected = list(range(1, max(indexed) + 1))
+ missing = [str(index) for index in expected if index not in indexed]
+ if missing:
+  raise RuntimeError("Varyasyon sırası eksik: " + ", ".join(missing))
+ return [indexed[index] for index in expected]
 
 class AzureCaptionClient:
  def __init__(self, key: str, url: str, guide: str):
@@ -128,8 +182,7 @@ class PublishWorker(QThread):
   completed = 0
   try:
    client = AzureCaptionClient(self.key, self.url, self.guide)
-   signature = inspect.signature(web_uploader.prepare_upload)
-   supports_publish = "publish" in signature.parameters
+   supports_publish = "publish" in inspect.signature(web_uploader.prepare_upload).parameters
    for profile, video in self.assignments:
     if self._cancelled: break
     if not video.is_file(): raise RuntimeError(f"Dağıtılan video bulunamadı: {video}")
@@ -155,20 +208,36 @@ class PublishWorker(QThread):
 def build_page(window: Any) -> QWidget:
  page = QWidget(); layout = QVBoxLayout(page)
  layout.setContentsMargins(0, 18, 0, 0); layout.setSpacing(14)
- title = QLabel("Guide + Profiller")
- title.setObjectName("sectionTitle")
+ title = QLabel("Guide + Profiller"); title.setObjectName("sectionTitle")
  note = QLabel(
-  "Önce Proxy Listesi'nde test edip sırayla atayın. Sonra Cold Open çıktıları "
-  "hesap sırasına eşleşir: 1.mp4 ilk profil ve onun proxy'si, 2.mp4 ikinci profil ve onun proxy'si."
+  "Dağıtım sırasını oklarla ayarla. Yeni üretim yapabilir veya daha önce uniquize "
+  "edilmiş 1.mp4, 2.mp4... klasörünü doğrudan dağıtabilirsin."
  )
  note.setObjectName("muted"); note.setWordWrap(True)
  layout.addWidget(title); layout.addWidget(note)
+
  form = QFormLayout()
  window.publish_azure_key = QLineEdit(secret("api_key")); window.publish_azure_key.setEchoMode(QLineEdit.Password)
  window.publish_azure_url = QLineEdit(secret("api_url"))
  window.publish_guide = QPlainTextEdit(secret("guide", DEFAULT_GUIDE)); window.publish_guide.setMinimumHeight(110)
- form.addRow("Azure API Key", window.publish_azure_key); form.addRow("Azure URL", window.publish_azure_url); form.addRow("Guide", window.publish_guide)
+ form.addRow("Azure API Key", window.publish_azure_key)
+ form.addRow("Azure URL", window.publish_azure_url)
+ form.addRow("Guide", window.publish_guide)
  layout.addLayout(form)
+
+ existing_row = QHBoxLayout()
+ window.existing_variants_folder = QLineEdit(); window.existing_variants_folder.setReadOnly(True)
+ window.existing_variants_folder.setPlaceholderText("Önceden uniquize edilmiş 1.mp4, 2.mp4... klasörü")
+ choose_existing = QPushButton("Klasör seç")
+ choose_existing.clicked.connect(lambda: choose_existing_folder(window))
+ window.distribute_existing_button = QPushButton("ÖNCEDEN UNIQUIZE EDİLMİŞ VİDEOLARI DAĞIT")
+ window.distribute_existing_button.setObjectName("primaryButton")
+ window.distribute_existing_button.clicked.connect(lambda: distribute_existing_variants(window))
+ existing_row.addWidget(window.existing_variants_folder, 1)
+ existing_row.addWidget(choose_existing)
+ existing_row.addWidget(window.distribute_existing_button)
+ layout.addLayout(existing_row)
+
  controls = QHBoxLayout(); save = QPushButton("Guide ve Azure ayarlarını kaydet")
  save.clicked.connect(lambda: save_settings(window, True))
  window.publish_auto_start = QCheckBox("Proxy doğrulandıktan sonra otomatik başlat")
@@ -179,8 +248,11 @@ def build_page(window: Any) -> QWidget:
  window.publish_cancel_button.clicked.connect(lambda: cancel_publish(window))
  for widget in (save, window.publish_auto_start, window.publish_start_button, window.publish_cancel_button): controls.addWidget(widget)
  controls.addStretch(); layout.addLayout(controls)
- window.publish_profiles_table = QTableWidget(0, 6)
- window.publish_profiles_table.setHorizontalHeaderLabels(["Sıra", "Profil", "Video", "Proxy", "Session ID", "Durum"])
+
+ window.publish_profiles_table = QTableWidget(0, 7)
+ window.publish_profiles_table.setHorizontalHeaderLabels(
+  ["Sıra", "Profil", "Video", "Proxy", "Session ID", "Durum", "Sırayı değiştir"]
+ )
  header = window.publish_profiles_table.horizontalHeader(); header.setSectionResizeMode(QHeaderView.ResizeToContents)
  header.setSectionResizeMode(1, QHeaderView.Stretch); header.setSectionResizeMode(2, QHeaderView.Stretch); header.setSectionResizeMode(3, QHeaderView.Stretch)
  layout.addWidget(window.publish_profiles_table, 1)
@@ -200,6 +272,48 @@ def save_settings(window: Any, show_message: bool = False) -> bool:
   if show_message: QMessageBox.critical(window, "Guide ayarı hatası", str(exc))
   return False
 
+def choose_existing_folder(window: Any) -> None:
+ initial = window.existing_variants_folder.text().strip() or str(Path.home())
+ folder = QFileDialog.getExistingDirectory(window, "Uniquize edilmiş video klasörünü seç", initial)
+ if folder:
+  window.existing_variants_folder.setText(str(Path(folder).resolve()))
+  try:
+   files = numbered_variants(Path(folder))
+   window.publish_status.setText(f"{len(files)} numaralı varyasyon bulundu. Dağıtmaya hazır.")
+  except Exception as exc:
+   window.publish_status.setText(f"Klasör kullanılamıyor: {exc}")
+
+def distribute_existing_variants(window: Any) -> None:
+ try:
+  folder_text = window.existing_variants_folder.text().strip()
+  if not folder_text:
+   raise RuntimeError("Önce uniquize edilmiş videoların klasörünü seçin")
+  files = numbered_variants(Path(folder_text))
+  distribute_outputs(window, files)
+ except Exception as exc:
+  window.publish_status.setText(f"Hazır varyasyonlar dağıtılamadı: {exc}")
+  QMessageBox.critical(window, "Hazır varyasyon dağıtımı başarısız", str(exc))
+
+def move_profile(window: Any, profile: str, direction: int) -> None:
+ try:
+  worker = getattr(window, "publish_worker", None)
+  if worker is not None:
+   raise RuntimeError("Yayın çalışırken profil sırası değiştirilemez")
+  names = profiles(window)
+  index = names.index(profile); target = index + direction
+  if target < 0 or target >= len(names):
+   return
+  names[index], names[target] = names[target], names[index]
+  save_profile_order(window, names)
+  assignments = list(getattr(window, "pending_assignments", []))
+  if assignments:
+   videos = [video for _, video in assignments]
+   window.pending_assignments = list(zip(names, videos, strict=False))
+  refresh_table(window)
+  window.publish_status.setText("Dağıtım sırası güncellendi: " + " → ".join(names))
+ except Exception as exc:
+  QMessageBox.critical(window, "Sıra değiştirilemedi", str(exc))
+
 def refresh_table(window: Any) -> None:
  names = profiles(window); assigned = dict(getattr(window, "pending_assignments", [])); table = window.publish_profiles_table
  table.clearContents(); table.setRowCount(len(names))
@@ -210,6 +324,13 @@ def refresh_table(window: Any) -> None:
   values = [str(row + 1), name, video.name if video else "Varyasyon bekliyor", proxy_text,
             "Kayıtlı" if tiktok_login.has_session(name) else "Eksik", state]
   for column, value in enumerate(values): table.setItem(row, column, QTableWidgetItem(value))
+  actions = QWidget(); action_layout = QHBoxLayout(actions); action_layout.setContentsMargins(0, 0, 0, 0)
+  up = QPushButton("Yukarı"); down = QPushButton("Aşağı")
+  up.setEnabled(row > 0); down.setEnabled(row < len(names) - 1)
+  up.clicked.connect(lambda _=False, profile=name: move_profile(window, profile, -1))
+  down.clicked.connect(lambda _=False, profile=name: move_profile(window, profile, 1))
+  action_layout.addWidget(up); action_layout.addWidget(down)
+  table.setCellWidget(row, 6, actions)
 
 def distribute_outputs(window: Any, files: object) -> None:
  try:
@@ -239,7 +360,7 @@ def start_publish(window: Any) -> None:
  try:
   if getattr(window, "publish_worker", None) is not None: raise RuntimeError("Bir yayın akışı zaten çalışıyor")
   assignments = list(getattr(window, "pending_assignments", []))
-  if not assignments: raise RuntimeError("Yayınlanacak dağıtım yok; önce Cold Open üretin")
+  if not assignments: raise RuntimeError("Yayınlanacak dağıtım yok; önce Cold Open üretin veya hazır varyasyon klasörü seçin")
   validate_proxy_assignments([name for name, _ in assignments])
   if not save_settings(window, False): raise RuntimeError("Azure Key, URL veya Guide geçersiz")
   worker = PublishWorker(assignments, window.publish_azure_key.text(), window.publish_azure_url.text(), window.publish_guide.toPlainText(), window)
@@ -247,8 +368,9 @@ def start_publish(window: Any) -> None:
   worker.preview_ready.connect(lambda p, v, c: confirm_preview(window, p, v, c))
   worker.profile_done.connect(lambda p: mark_done(window, p)); worker.failed.connect(lambda detail: publish_failed(window, detail))
   worker.all_done.connect(lambda count: publish_finished(window, count)); worker.finished.connect(lambda: cleanup_worker(window))
-  window.publish_start_button.setEnabled(False); window.publish_cancel_button.setEnabled(True)
-  window.publish_status.setText("Atanmış proxylerle otomatik yayın akışı başlatılıyor..."); worker.start()
+  window.publish_start_button.setEnabled(False); window.distribute_existing_button.setEnabled(False)
+  window.publish_cancel_button.setEnabled(True); window.publish_status.setText("Atanmış proxylerle otomatik yayın akışı başlatılıyor...")
+  worker.start()
  except Exception as exc:
   window.publish_status.setText(f"Yayın başlatılamadı: {exc}"); QMessageBox.critical(window, "Yayın başlatılamadı", str(exc))
 
@@ -278,12 +400,14 @@ def cancel_publish(window: Any) -> None:
 
 def cleanup_worker(window: Any) -> None:
  worker = getattr(window, "publish_worker", None); window.publish_worker = None
- window.publish_start_button.setEnabled(True); window.publish_cancel_button.setEnabled(False)
+ window.publish_start_button.setEnabled(True); window.distribute_existing_button.setEnabled(True)
+ window.publish_cancel_button.setEnabled(False)
  if worker: worker.deleteLater()
 
 def install(window: Any) -> None:
  if getattr(window, "_publishing_flow_gui_installed", False): return
- window.pending_assignments = []; window.publish_worker = None; window.guide_profiles_page = build_page(window)
+ window.pending_assignments = []; window.publish_worker = None; window._publish_profile_order = None
+ window.guide_profiles_page = build_page(window)
  session_index = window.tabs.indexOf(getattr(window, "session_accounts_page", None)); insert_at = session_index + 1 if session_index >= 0 else 2
  window.tabs.insertTab(insert_at, window.guide_profiles_page, "Guide + Profiller")
  try: window.uniquizer_tab.outputs_ready.disconnect()
