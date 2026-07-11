@@ -18,6 +18,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
       - run: python -m compileall -q .
+      - run: python advanced_risk_smoke.py
       - run: python risk_controls_smoke.py
       - run: python network_identity_smoke.py
       - run: python zero_view_risk_smoke.py
