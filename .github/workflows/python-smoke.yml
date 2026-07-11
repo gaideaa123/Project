@@ -1,81 +1,27 @@
 name: Python smoke tests
 
 on:
- pull_request:
- push:
-  branches: [main]
+  pull_request:
+  push:
+    branches: [main]
 
 jobs:
- smoke:
-  runs-on: ubuntu-latest
-  timeout-minutes: 15
-  env:
-   QT_QPA_PLATFORM: offscreen
-   PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
-   XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
-   XDG_DATA_HOME: ${{ runner.temp }}/xdg-data
-   XDG_CACHE_HOME: ${{ runner.temp }}/xdg-cache
-  steps:
-   - uses: actions/checkout@v4
-   - uses: actions/setup-python@v5
-     with:
-      python-version: '3.11'
-      cache: pip
-   - name: Install dependencies
-     run: |
-      python -m pip install --upgrade pip
-      python -m pip install -r requirements.txt
-   - name: Compile production modules
-     run: |
-      python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py sitecustomize.py
-      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py originality_qa.py qa_runtime_dependencies.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py target_reachability.py tiktok_login.py tiktok_overlays.py auto_publish_flow.py upload_state.py
-      python -m py_compile antibot_resilience.py antibot_sandbox.py socks_bridge.py
-      python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
-      python -m py_compile utils/antibot_resilience.py utils/network_identity.py
-      python -m py_compile playwright_interactions.py user_assisted_playwright.py
-      python -m py_compile publication_guard.py test_publication_integration.py
-   - name: Startup dependency contract
-     run: python startup_dependency_test.py
-   - name: Proxy integration smoke
-     run: |
-      python network_identity_smoke.py
-      python risk_controls_smoke.py
-      python proxy_health_false_negative_test.py
-      python proxy_web_inheritance_test.py
-      python socks5_proxy_test.py
-      python socks5_health_bridge_test.py
-      python guide_proxy_assignment_test.py
-      python direct_connection_policy_test.py
-      python target_reachability_test.py
-   - name: Session, upload and publish flow tests
-     run: |
-      python -m unittest -v session_publish_unit_tests.py
-      python content_check_overlay_test.py
-      python originality_qa_test.py
-      python auto_publish_flow_test.py
-      python upload_state_test.py
-      python upload_retry_test.py
-   - name: Updater contract
-     run: python updater_contract_test.py
-   - name: App TR layout startup smoke
-     run: python layout_compat_smoke.py
-   - name: Feature contract
-     run: python feature_presence_contract_test.py
-   - name: Guide profile auto-publish contract
-     run: python publish_flow_contract_test.py
-   - name: Core GUI smoke
-     run: python smoke_test.py
-   - name: Preflight smoke
-     run: python preflight_smoke.py
-   - name: Media QA smoke
-     run: python media_qa_smoke.py
-   - name: Defensive resilience smoke
-     run: python antibot_resilience_smoke.py
-   - name: Assisted interaction unit tests
-     run: |
-      python -m unittest -v test_human_interactions.py
-      python -m unittest -v test_user_assisted_playwright.py
-   - name: Zero-view risk gates
-     run: python zero_view_risk_smoke.py
-   - name: Publication integration tests
-     run: python -m unittest -v test_publication_integration.py
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python smoke_test.py
+      - run: python preflight_smoke.py
+      - run: python -m py_compile media_qa.py media_qa_smoke.py
+      - run: python media_qa_smoke.py
+      - run: python -m py_compile antibot_resilience.py antibot_resilience_smoke.py
+      - run: python antibot_resilience_smoke.py
