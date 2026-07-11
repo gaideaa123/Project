@@ -12,6 +12,7 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 import copyright_dialog
 import preflight_hook
+import publish_verification
 import tiktok_overlays
 
 SERVICE = "signaldesk-tiktok-web-login"
@@ -143,7 +144,6 @@ def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool
 
 
 def install(web_uploader: Any):
-    """Install once; serialize temporary module-level wrappers per profile."""
     with _INSTALL_LOCK:
         if getattr(web_uploader, "_signaldesk_login_installed", False):
             preflight_hook.install(web_uploader)
@@ -152,6 +152,7 @@ def install(web_uploader: Any):
         original_prepare = web_uploader.prepare_upload
         original_confirm = web_uploader.confirm_publish_dialog
         original_notice = web_uploader.dismiss_pre_caption_notice
+        original_ready = getattr(web_uploader, "wait_for_upload_complete", None)
         web_uploader.file_input_ready = file_input_ready
 
         def launch(playwright, profile):
@@ -182,12 +183,16 @@ def install(web_uploader: Any):
             )
             return result
 
+        def guarded_ready(page, status=None, timeout_seconds=900):
+            button = original_ready(page, status=status, timeout_seconds=timeout_seconds)
+            publish_verification.assert_non_private_audience(page, status)
+            return button
+
         def prepare(request, publish=False, approval=None, status=None):
-            # app_tr is sequential today. The lock also prevents accidental future
-            # parallel calls from exchanging profile-specific waiter functions.
             with _INSTALL_LOCK:
                 original_wait = web_uploader.wait_for_upload_after_login
                 previous_confirm = web_uploader.confirm_publish_dialog
+                previous_result = web_uploader.wait_for_publish_result
 
                 def waiter(page, timeout_seconds=900, status=None):
                     result = wait_for_upload_after_login(
@@ -198,10 +203,17 @@ def install(web_uploader: Any):
                     )
                     return result
 
+                def verified_result(page, timeout_seconds=180):
+                    return publish_verification.wait_for_publish_result(
+                        page, timeout_seconds=timeout_seconds, status=status,
+                        profile=request.profile,
+                    )
+
                 web_uploader.wait_for_upload_after_login = waiter
                 web_uploader.confirm_publish_dialog = confirm_for_every_profile
+                web_uploader.wait_for_publish_result = verified_result
                 if status:
-                    status(f"{request.profile}: içerik kontrolü açık, telif onayı etkin")
+                    status(f"{request.profile}: içerik kontrolü açık, kesin yayın doğrulaması etkin")
                 try:
                     return original_prepare(
                         request, publish=publish, approval=approval, status=status
@@ -209,10 +221,13 @@ def install(web_uploader: Any):
                 finally:
                     web_uploader.wait_for_upload_after_login = original_wait
                     web_uploader.confirm_publish_dialog = previous_confirm
+                    web_uploader.wait_for_publish_result = previous_result
 
         web_uploader.launch_context = launch
         web_uploader.confirm_publish_dialog = confirm_for_every_profile
         web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
+        if original_ready is not None:
+            web_uploader.wait_for_upload_complete = guarded_ready
         web_uploader.prepare_upload = prepare
         web_uploader._signaldesk_login_installed = True
         preflight_hook.install(web_uploader)
