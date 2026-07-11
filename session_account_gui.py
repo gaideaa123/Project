@@ -8,7 +8,12 @@ from PySide6.QtWidgets import QCheckBox,QDialog,QDialogButtonBox,QFormLayout,QHB
 import auto_publish_flow,direct_connection_policy,tiktok_login
 try:
  import web_uploader
- tiktok_login.install(web_uploader); auto_publish_flow.install(web_uploader)
+ import published_review_bridge
+ # Install order is deliberate: login first, automatic publisher second, then
+ # the outermost outcome bridge so errors from every inner layer are classified.
+ tiktok_login.install(web_uploader)
+ auto_publish_flow.install(web_uploader)
+ published_review_bridge.install(web_uploader)
 except Exception:pass
 
 def account_rows(window):
