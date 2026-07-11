@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 import app as core
 import network_identity_gui
 from proxy_publisher import install_proxy_backend
+from uniquizer_tab import UniquizerTab
 
 AYAR_SERVISI = "signaldesk-agency-console.app-settings"
 VARSAYILAN_REDIRECT = "http://127.0.0.1:3455/callback/"
@@ -27,8 +28,11 @@ METINLER = {
  "Ship content with a paper trail.": "İçeriği kayıtlı, kontrollü ve güvenli yayınla.",
  "Content control, without the chaos.": "İçeriği kayıtlı, kontrollü ve güvenli yayınla.",
  "Profile Manager": "Profil Yönetimi", "Accounts": "Profil Yönetimi",
+ "Profiles": "Profil Yönetimi",
  "Batch Processing": "Toplu Medya İşleme", "Processing": "Toplu Medya İşleme",
- "Deployment Queue": "Yayın Kuyruğu", "Scheduler": "Yayın Kuyruğu",
+ "Asset processing": "Toplu Medya İşleme",
+ "Deployment Queue": "Yayın Kuyruğu", "Deployment queue": "Yayın Kuyruğu",
+ "Scheduler": "Yayın Kuyruğu",
  "Connect an official channel": "Resmî bir kanal bağla", "Connect a profile": "Resmî bir kanal bağla",
  "Profile": "Profil", "Profile name": "Profil", "Platform": "Platform",
  "Access token": "Erişim belirteci", "Refresh token": "Yenileme belirteci",
@@ -76,6 +80,7 @@ def ayarlari_yukle() -> None:
 
 class TurkceAnaPencere(core.MainWindow):
  def __init__(self) -> None:
+  self.uniquizer_tab: UniquizerTab | None = None
   super().__init__()
   install_proxy_backend(self)
 
@@ -83,7 +88,13 @@ class TurkceAnaPencere(core.MainWindow):
   super().build_ui()
   self.setWindowTitle("SignalDesk Ajans Paneli")
   self._cekirdek_uyumlulugunu_kur()
-  self.tabs.addTab(self.api_sekmesi(), "API Ayarları")
+
+  self.uniquizer_tab = UniquizerTab(self)
+  self.uniquizer_tab.outputs_ready.connect(self._uniquizer_outputs_ready)
+  self.tabs.insertTab(1, self.uniquizer_tab, "Cold Open Uniquizer")
+
+  self.api_page = self.api_sekmesi()
+  self.tabs.addTab(self.api_page, "API Ayarları")
   self._cevir()
 
  def _cekirdek_uyumlulugunu_kur(self) -> None:
@@ -122,6 +133,23 @@ class TurkceAnaPencere(core.MainWindow):
   self.output_dir.setReadOnly(False)
   self.output_dir.setClearButtonEnabled(True)
   self.output_dir.editingFinished.connect(self._normalize_output)
+
+ def _uniquizer_outputs_ready(self, files: object) -> None:
+  outputs = [str(Path(value).resolve()) for value in list(files or [])]
+  if not outputs:
+   QMessageBox.critical(self, "Cold Open Uniquizer", "Uniquizer geçerli çıktı üretmedi.")
+   return
+  self.last_outputs = outputs
+  queue_field = getattr(self, "queue_video", getattr(self, "schedule_video", None))
+  if queue_field is not None:
+   queue_field.setText(outputs[0])
+  if hasattr(self, "log"):
+   self.log(f"Cold Open Uniquizer: {len(outputs)} çıktı hazır")
+  QMessageBox.information(
+   self,
+   "Cold Open varyasyonları hazır",
+   f"{len(outputs)} video üretildi. İlk çıktı yayın alanına aktarıldı.",
+  )
 
  def api_sekmesi(self) -> QWidget:
   page = QWidget()
@@ -210,9 +238,17 @@ class TurkceAnaPencere(core.MainWindow):
    self.error("OAuth yardımcısı açılamadı", str(exc))
 
  def _cevir(self) -> None:
-  for index, name in enumerate(("Profil Yönetimi", "Toplu Medya İşleme", "Yayın Kuyruğu", "API Ayarları", "Proxy Listesi")):
-   if index < self.tabs.count():
-    self.tabs.setTabText(index, name)
+  for index in range(self.tabs.count()):
+   current = self.tabs.tabText(index)
+   self.tabs.setTabText(index, METINLER.get(current, current))
+  if self.uniquizer_tab is not None:
+   index = self.tabs.indexOf(self.uniquizer_tab)
+   if index >= 0:
+    self.tabs.setTabText(index, "Cold Open Uniquizer")
+  if hasattr(self, "api_page"):
+   index = self.tabs.indexOf(self.api_page)
+   if index >= 0:
+    self.tabs.setTabText(index, "API Ayarları")
   for label in self.findChildren(QLabel):
    label.setText(METINLER.get(label.text(), label.text()))
   for button in self.findChildren(QPushButton):
@@ -337,6 +373,17 @@ class TurkceAnaPencere(core.MainWindow):
    super().error(title, details)
   else:
    super().show_error(title, details)
+
+ def closeEvent(self, event) -> None:
+  if self.uniquizer_tab is not None and not self.uniquizer_tab.shutdown(5000):
+   QMessageBox.warning(
+    self,
+    "Cold Open Uniquizer çalışıyor",
+    "Video üretimi bitmeden pencere kapatılamaz.",
+   )
+   event.ignore()
+   return
+  super().closeEvent(event)
 
 network_identity_gui.install(TurkceAnaPencere)
 
