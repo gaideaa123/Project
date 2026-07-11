@@ -28,7 +28,7 @@ jobs:
    - name: Compile production modules
      run: |
       python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py sitecustomize.py
-      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py
+      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py target_reachability.py
       python -m py_compile antibot_resilience.py antibot_sandbox.py socks_bridge.py
       python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
       python -m py_compile utils/antibot_resilience.py utils/network_identity.py
@@ -44,6 +44,7 @@ jobs:
       python socks5_health_bridge_test.py
       python guide_proxy_assignment_test.py
       python direct_connection_policy_test.py
+      python target_reachability_test.py
    - name: Updater contract
      run: python updater_contract_test.py
    - name: App TR layout startup smoke
