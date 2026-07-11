@@ -11,6 +11,7 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 import copyright_dialog
 import copyright_policy
+import preflight_hook
 import tiktok_overlays
 
 SERVICE = "signaldesk-tiktok-web-login"
@@ -142,6 +143,7 @@ def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool
 
 def install(web_uploader: Any):
     if getattr(web_uploader, "_signaldesk_login_installed", False):
+        preflight_hook.install(web_uploader)
         return
     original_launch = web_uploader.launch_context
     original_prepare = web_uploader.prepare_upload
@@ -165,8 +167,6 @@ def install(web_uploader: Any):
         original_confirm(page)
 
     def no_copyright_confirm(page):
-        # Later accounts already disabled content checks via the Kapat onboarding
-        # action. Do not search for or click Hemen paylaş on 2.mp4 and later.
         return None
 
     def dismiss_pre_caption_notice(
@@ -202,11 +202,6 @@ def install(web_uploader: Any):
         web_uploader.confirm_publish_dialog = (
             first_profile_confirm if is_first else no_copyright_confirm
         )
-        if status:
-            status(
-                f"{request.profile}: telif onayı "
-                + ("yalnız ilk profil için etkin" if is_first else "atlanıyor")
-            )
         try:
             return original_prepare(
                 request, publish=publish, approval=approval, status=status
@@ -220,3 +215,4 @@ def install(web_uploader: Any):
     web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
     web_uploader.prepare_upload = prepare
     web_uploader._signaldesk_login_installed = True
+    preflight_hook.install(web_uploader)
