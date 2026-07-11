@@ -13,8 +13,8 @@ $files = @(
  "smoke_test.py", "preflight_smoke.py", "media_qa_smoke.py", "antibot_resilience_smoke.py",
  "antibot_sandbox_smoke.py", "runtime_contract_smoke.py", "feature_presence_contract_test.py",
  "publish_flow_contract_test.py", "proxy_web_inheritance_test.py", "socks5_proxy_test.py",
- "socks5_health_bridge_test.py", "updater_contract_test.py", "README.md", "TURKCE_KURULUM.md",
- "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
+ "socks5_health_bridge_test.py", "guide_proxy_assignment_test.py", "updater_contract_test.py",
+ "README.md", "TURKCE_KURULUM.md", "WEB_GUI_KURULUM.md", "WEB_YUKLEME_KURULUM.md"
 )
 
 $stage = Join-Path $env:TEMP ("signaldesk-update-" + [guid]::NewGuid().ToString("N"))
@@ -27,35 +27,32 @@ try {
   Invoke-WebRequest -Uri "$repo/$file" -OutFile $download -UseBasicParsing
   if ((Get-Item $download).Length -eq 0) { throw "$file bos indirildi" }
  }
-
  $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
  if (-not (Test-Path $python)) { throw ".venv bulunamadi. Once: py -3.11 -m venv .venv" }
  & $python -m compileall -q $stage
  if ($LASTEXITCODE -ne 0) { throw "Indirilen Python dosyalari derlenemedi" }
-
  foreach ($file in $files) {
   $target = Join-Path $PSScriptRoot $file
   New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
   Move-Item (Join-Path $stage $file) $target -Force
   Write-Host " OK $file"
  }
-
  & $python -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
  if ($LASTEXITCODE -ne 0) { throw "Bagimlilik kurulumu basarisiz" }
  & $python -m playwright install chromium
  if ($LASTEXITCODE -ne 0) { throw "Playwright Chromium kurulumu basarisiz" }
-
  $env:QT_QPA_PLATFORM = "offscreen"
  & $python (Join-Path $PSScriptRoot "socks5_proxy_test.py")
  if ($LASTEXITCODE -ne 0) { throw "SOCKS5 bridge testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "socks5_health_bridge_test.py")
  if ($LASTEXITCODE -ne 0) { throw "SOCKS5 saglik testi basarisiz" }
+ & $python (Join-Path $PSScriptRoot "guide_proxy_assignment_test.py")
+ if ($LASTEXITCODE -ne 0) { throw "Guide proxy atama testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "runtime_contract_smoke.py")
  if ($LASTEXITCODE -ne 0) { throw "app_tr akis testi basarisiz" }
  & $python (Join-Path $PSScriptRoot "smoke_test.py")
  if ($LASTEXITCODE -ne 0) { throw "Duman testi basarisiz" }
  Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
-
  Write-Host "`nHazir. Tum eski SignalDesk pencerelerini kapatip calistir:" -ForegroundColor Green
  Write-Host ".\.venv\Scripts\python.exe .\app_tr.py" -ForegroundColor Yellow
 }
