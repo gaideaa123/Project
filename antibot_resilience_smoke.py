@@ -10,6 +10,7 @@ from antibot_resilience import (
     ResilienceError,
     ResilienceReport,
 )
+from antibot_sandbox import SandboxConfig, SandboxError, build_synthetic_init_script
 
 
 class FixtureTests(unittest.TestCase):
@@ -52,6 +53,34 @@ class FixtureTests(unittest.TestCase):
             text = target.read_text(encoding="utf-8")
             self.assertIn('"detection_rate": 0.5', text)
             self.assertFalse(target.with_suffix(".json.tmp").exists())
+
+
+class SandboxGuardrailTests(unittest.TestCase):
+    def test_only_loopback_http_targets_are_accepted(self):
+        SandboxConfig("http://127.0.0.1:8765/", mode="synthetic").validate()
+        for target in ("https://example.com", "http://192.168.1.10", "file:///tmp/lab"):
+            with self.subTest(target=target), self.assertRaises(SandboxError):
+                SandboxConfig(target, mode="synthetic").validate()
+
+    def test_non_loopback_proxy_is_rejected(self):
+        SandboxConfig(proxy="http://127.0.0.1:8899").validate()
+        with self.assertRaises(SandboxError):
+            SandboxConfig(proxy="http://proxy.example:8080").validate()
+
+    def test_runtime_hook_is_executable_and_deterministic(self):
+        first = build_synthetic_init_script("classroom")
+        second = build_synthetic_init_script("classroom")
+        self.assertEqual(first, second)
+        self.assertRegex(first, r"\}\)\(\d+\);\s*$")
+        self.assertNotIn("__SEED__", first)
+        for marker in (
+            "navigatorPrototype, 'webdriver'",
+            "window, 'chrome'",
+            "__sandboxCdpProbe",
+            "HTMLCanvasElement.prototype, 'toDataURL'",
+            "WebGLRenderingContext",
+        ):
+            self.assertIn(marker, first)
 
 
 if __name__ == "__main__":
