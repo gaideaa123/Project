@@ -13,6 +13,9 @@ ALLOWED_SCHEMES = {"http", "https", "socks5"}
 class NetworkIdentityError(RuntimeError):
  pass
 
+def _authority_host(hostname: str) -> str:
+ return f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+
 @dataclass(frozen=True)
 class NetworkIdentity:
  server: str = ""
@@ -33,6 +36,8 @@ class NetworkIdentity:
    raise NetworkIdentityError("Proxy host ve port içermeli")
   if parsed.username or parsed.password:
    raise NetworkIdentityError("Kullanıcı/parolayı kayıtlı server alanına gömmeyin")
+  if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+   raise NetworkIdentityError("Proxy server yalnız scheme://host:port içermeli")
   if bool(self.username) != bool(self.password):
    raise NetworkIdentityError("Proxy kullanıcı adı ve parolası birlikte girilmeli")
 
@@ -57,16 +62,19 @@ def _from_url(raw: str) -> NetworkIdentity:
   raise NetworkIdentityError("Proxy portu geçersiz") from exc
  if not parsed.hostname or not port:
   raise NetworkIdentityError("Proxy URL host ve port içermeli")
+ if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+  raise NetworkIdentityError("Proxy URL sonunda path, query veya fragment olamaz")
  username = unquote(parsed.username or "")
  password = unquote(parsed.password or "")
  if bool(username) != bool(password):
   raise NetworkIdentityError("Proxy URL kullanıcı adı ve parolayı birlikte içermeli")
- identity = NetworkIdentity(f"{scheme}://{parsed.hostname}:{port}", username, password)
+ host = _authority_host(parsed.hostname)
+ identity = NetworkIdentity(f"{scheme}://{host}:{port}", username, password)
  identity.validate()
  return identity
 
 def parse_proxy_line(value: str, default_scheme: str = "http") -> NetworkIdentity:
- """Accept URL form or legacy host:port:user:pass form."""
+ """Accept scheme://user:pass@host:port or host:port:user:pass."""
  raw = value.strip()
  if not raw:
   raise NetworkIdentityError("Boş proxy satırı")
@@ -77,9 +85,7 @@ def parse_proxy_line(value: str, default_scheme: str = "http") -> NetworkIdentit
   raise NetworkIdentityError(f"Desteklenmeyen proxy tipi: {scheme}")
  parts = raw.split(":", 3)
  if len(parts) not in {2, 4}:
-  raise NetworkIdentityError(
-   "Proxy; scheme://kullanıcı:parola@host:port veya host:port:kullanıcı:parola olmalı"
-  )
+  raise NetworkIdentityError("Proxy; scheme://kullanıcı:parola@host:port veya host:port:kullanıcı:parola olmalı")
  host, port_text = parts[0].strip(), parts[1].strip()
  if not host or not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
   raise NetworkIdentityError("Proxy host/port geçersiz")
@@ -116,7 +122,7 @@ def proxy_url(identity: NetworkIdentity) -> str:
  auth = ""
  if identity.username:
   auth = f"{quote(identity.username, safe='')}:{quote(identity.password, safe='')}@"
- return f"{scheme}://{auth}{parsed.hostname}:{parsed.port}"
+ return f"{scheme}://{auth}{_authority_host(parsed.hostname or '')}:{parsed.port}"
 
 def requests_proxies(identity: NetworkIdentity) -> dict[str, str] | None:
  value = proxy_url(identity)
