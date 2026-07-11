@@ -21,38 +21,44 @@ def main() -> None:
     for filename in (
         "app.py", "app_tr.py", "oauth_helper.py", "web_uploader.py",
         "tiktok_login.py", "tiktok_overlays.py", "copyright_dialog.py",
-        "copyright_policy.py", "video_variants.py", "uniquizer_tab.py",
+        "content_preflight.py", "preflight_hook.py", "video_variants.py",
+        "uniquizer_tab.py",
     ):
         py_compile.compile(str(root / filename), doraise=True)
         check(True, f"{filename} sözdizimi")
 
     import app_tr
     import copyright_dialog
-    import copyright_policy
     import tiktok_login
     import tiktok_overlays
     import web_uploader
     from PySide6.QtWidgets import QApplication, QSpinBox
 
-    check(copyright_policy.is_first_profile_video(Path("1.mp4")), "1.mp4 ilk profil")
-    for name in ("2.mp4", "3.mp4", "10.mp4", "1.mov", "video.mp4"):
-        check(not copyright_policy.is_first_profile_video(Path(name)), f"{name} telif onayı almaz")
+    check(tiktok_overlays.CONTENT_CHECK_TEXT.search("İçerik kontrolü") is not None, "içerik kontrolü modalı")
+    for label in ("Aç", "Etkinleştir", "İçerik kontrolünü aç", "Turn on", "Enable"):
+        check(tiktok_overlays.ENABLE_CONTENT_CHECK.fullmatch(label) is not None, f"kontrol açma düğmesi: {label}")
+    check(tiktok_overlays.ENABLE_CONTENT_CHECK.fullmatch("Kapat") is None, "Kapat hiçbir zaman Aç olarak eşleşmez")
 
-    install_source = inspect.getsource(tiktok_login.install)
-    check("is_first_profile_video(request.video)" in install_source, "karar atanmış video numarasından alınır")
-    check("first_profile_confirm if is_first else no_copyright_confirm" in install_source, "yalnız ilk profil handler seçimi")
-    check("web_uploader.confirm_publish_dialog = previous_confirm" in install_source, "profil sonrası handler geri yüklenir")
-    check("handle_copyright_publish_dialog" not in inspect.getsource(copyright_policy), "policy dialoga dokunmaz")
-    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Hemen paylaş") is not None, "ilk profil exact Hemen paylaş")
+    overlay_source = inspect.getsource(tiktok_overlays)
+    clear_source = inspect.getsource(tiktok_overlays.clear_new_account_overlays)
+    check("_click_close" not in overlay_source, "Kapat tıklama kodu tamamen kaldırıldı")
+    check("_enable_content_check" in clear_source, "içerik kontrolü Aç akışına bağlı")
+    check(clear_source.index("_click_cookie") < clear_source.index("_enable_content_check") < clear_source.index("_click_got_it"), "çerez → Aç → Anladım sırası")
+    check("CONTENT_CHECK_TEXT.search(text)" in inspect.getsource(tiktok_overlays._enable_content_check), "Aç yalnız içerik kontrolü container'ında")
+    check("PUBLISH_TEXT.search(text)" in inspect.getsource(tiktok_overlays._enable_content_check), "paylaş/telif dialogu onboarding Aç akışından hariç")
 
-    check(tiktok_overlays.CLOSE.fullmatch("Kapat") is not None, "sonraki hesaplarda Kapat korunuyor")
-    check(tiktok_overlays.GOT_IT.fullmatch("Anladım") is not None, "sonraki hesaplarda Anladım korunuyor")
-    check(tiktok_overlays.EXCLUDED_TEXT.search("Telif hakkı kontrolü eksik") is not None, "onboarding telif dialoguna dokunmaz")
+    login_source = inspect.getsource(tiktok_login.install)
+    check("confirm_for_every_profile" in login_source, "telif onayı tüm profillerde")
+    check("is_first_profile_video" not in login_source, "1.mp4 özel kısıtı kaldırıldı")
+    check("no_copyright_confirm" not in login_source, "sonraki profillerde telif handler kapatılmıyor")
+    check("web_uploader.confirm_publish_dialog = confirm_for_every_profile" in login_source, "global ve profil çağrısı telif handler'a bağlı")
+    check("previous_confirm" in login_source, "wrapper profil sonrası güvenli geri yüklenir")
+    check(copyright_dialog.IMMEDIATE_SHARE.fullmatch("Hemen paylaş") is not None, "tüm profiller exact Hemen paylaş")
 
     flow = inspect.getsource(web_uploader.prepare_upload)
     steps = ["button.click(", "confirm_publish_dialog(", "wait_for_publish_result("]
     positions = [flow.index(step) for step in steps]
-    check(positions == sorted(positions), "ana Paylaş → koşullu telif onayı → sonuç")
+    check(positions == sorted(positions), "Paylaş → tüm profillerde Hemen paylaş → sonuç")
 
     qt = QApplication.instance() or QApplication([])
     with patch.object(app_tr.tiktok_login, "has_session", return_value=False), patch.object(app_tr.tiktok_login, "has_credentials", return_value=False):
@@ -72,11 +78,11 @@ def main() -> None:
                     ("Emre", Path(files[1]).resolve()),
                     ("Berlin", Path(files[2]).resolve()),
                 ]
-                check(window.pending_assignments == expected, "1.mp4 ilk, 2.mp4 ikinci, 3.mp4 üçüncü profil")
+                check(window.pending_assignments == expected, "profil-video sırası korunuyor")
                 start.assert_called_once_with(expected)
         window.close()
     qt.quit()
-    print("\nİLK PROFİL TELİF POLİTİKASI VE SIRALI YAYIN TESTLERİ GEÇTİ")
+    print("\nİÇERİK KONTROLÜ AÇIK VE TÜM PROFİL TELİF TESTLERİ GEÇTİ")
 
 
 if __name__ == "__main__":
