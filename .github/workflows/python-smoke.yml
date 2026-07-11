@@ -28,7 +28,7 @@ jobs:
    - name: Compile production modules
      run: |
       python -m py_compile app.py app_tr.py proxy_publisher.py proxy_health.py network_identity.py network_identity_gui.py sitecustomize.py
-      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py originality_qa.py qa_runtime_dependencies.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py target_reachability.py tiktok_login.py tiktok_overlays.py auto_publish_flow.py upload_state.py
+      python -m py_compile oauth_helper.py media_qa.py uniquizer_tab.py video_variants.py originality_qa.py qa_runtime_dependencies.py session_account_gui.py publishing_flow_gui.py direct_connection_policy.py target_reachability.py navigation_retry.py tiktok_login.py tiktok_overlays.py auto_publish_flow.py upload_state.py
       python -m py_compile antibot_resilience.py antibot_sandbox.py socks_bridge.py
       python -m py_compile web_uploader.py web_upload_engine.py web_gui_integration.py
       python -m py_compile utils/antibot_resilience.py utils/network_identity.py
@@ -36,7 +36,7 @@ jobs:
       python -m py_compile publication_guard.py test_publication_integration.py
    - name: Startup dependency contract
      run: python startup_dependency_test.py
-   - name: Proxy integration smoke
+   - name: Proxy and navigation smoke
      run: |
       python network_identity_smoke.py
       python risk_controls_smoke.py
@@ -47,6 +47,7 @@ jobs:
       python guide_proxy_assignment_test.py
       python direct_connection_policy_test.py
       python target_reachability_test.py
+      python navigation_retry_test.py
    - name: Session, upload and publish flow tests
      run: |
       python -m unittest -v session_publish_unit_tests.py
