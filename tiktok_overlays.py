@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-"""Dismiss optional TikTok onboarding overlays for a newly used profile.
-
-Only visible, exact-labelled controls inside modal/banner containers are clicked.
-Copyright and publish confirmations are deliberately excluded.
-"""
+"""Handle optional TikTok onboarding without disabling content checks."""
 
 import re
 import time
@@ -15,22 +11,25 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 StatusCallback = Callable[[str], None]
 COOKIE_ALLOW = re.compile(
     r"^(tümüne izin ver|tüm çerezlere izin ver|çerezlere izin ver|"
-    r"allow all|allow all cookies|accept all|accept all cookies)$",
+    r"allow all|allow all cookies|accept all|accept all cookies)$", re.I,
+)
+CONTENT_CHECK_TEXT = re.compile(
+    r"içerik kontrol|içeriği kontrol|telif hakkı kontrol|content check|copyright check",
     re.I,
 )
-CLOSE = re.compile(r"^(kapat|close)$", re.I)
+ENABLE_CONTENT_CHECK = re.compile(
+    r"^(aç|etkinleştir|kontrolü aç|içerik kontrolünü aç|"
+    r"turn on|enable|enable check|turn on content check)$", re.I,
+)
 GOT_IT = re.compile(r"^(anladım|tamam|got it|understood|i understand)$", re.I)
-EXCLUDED_TEXT = re.compile(
-    r"telif|copyright|paylaşmaya devam|publish|post|share|yayınla|paylaş",
+PUBLISH_TEXT = re.compile(
+    r"paylaşmaya devam|publish anyway|share now|post now|hemen paylaş|"
+    r"hemen yayınla|yayınlamaya devam",
     re.I,
 )
 CONTAINER_SELECTORS = (
-    '[role="dialog"]',
-    '[aria-modal="true"]',
-    '[role="alertdialog"]',
-    '[class*="modal" i]',
-    '[class*="dialog" i]',
-    '[class*="banner" i]',
+    '[role="dialog"]', '[aria-modal="true"]', '[role="alertdialog"]',
+    '[class*="modal" i]', '[class*="dialog" i]', '[class*="banner" i]',
     '[class*="cookie" i]',
 )
 
@@ -93,10 +92,8 @@ def _click_exact(container, pattern: re.Pattern[str]) -> bool:
         candidate = candidates.nth(index)
         try:
             label = re.sub(
-                r"\s+", " ",
-                candidate.get_attribute("aria-label")
-                or candidate.inner_text(timeout=400)
-                or "",
+                r"\s+", " ", candidate.get_attribute("aria-label")
+                or candidate.inner_text(timeout=400) or "",
             ).strip()
             if pattern.fullmatch(label) and candidate.is_visible(timeout=200):
                 candidate.click(timeout=4000)
@@ -108,13 +105,12 @@ def _click_exact(container, pattern: re.Pattern[str]) -> bool:
 
 def _click_cookie(page, status=None) -> bool:
     for container, text in _containers(page):
-        if EXCLUDED_TEXT.search(text):
+        if PUBLISH_TEXT.search(text):
             continue
         if _click_exact(container, COOKIE_ALLOW):
             _notify(status, "Çerez izni kabul edildi")
             page.wait_for_timeout(300)
             return True
-    # Cookie banners are sometimes not modal-like; exact global label is safe.
     global_button = page.get_by_role("button", name=COOKIE_ALLOW)
     if _visible(global_button, 250):
         global_button.first.click(timeout=4000)
@@ -124,20 +120,21 @@ def _click_cookie(page, status=None) -> bool:
     return False
 
 
-def _click_close(page, status=None) -> bool:
+def _enable_content_check(page, status=None) -> bool:
+    """Click Aç only inside a verified content-check onboarding container."""
     for container, text in _containers(page):
-        if EXCLUDED_TEXT.search(text):
+        if PUBLISH_TEXT.search(text) or not CONTENT_CHECK_TEXT.search(text):
             continue
-        if _click_exact(container, CLOSE):
-            _notify(status, "Yeni hesap uyarısı Kapat ile kapatıldı")
-            page.wait_for_timeout(300)
+        if _click_exact(container, ENABLE_CONTENT_CHECK):
+            _notify(status, "İçerik kontrolü Aç ile etkinleştirildi")
+            page.wait_for_timeout(400)
             return True
     return False
 
 
 def _click_got_it(page, status=None) -> bool:
     for container, text in _containers(page):
-        if EXCLUDED_TEXT.search(text):
+        if PUBLISH_TEXT.search(text):
             continue
         if _click_exact(container, GOT_IT):
             _notify(status, "TikTok bilgilendirmesi Anladım ile kapatıldı")
@@ -152,27 +149,24 @@ def clear_new_account_overlays(
     timeout_seconds: float = 20.0,
     quiet_seconds: float = 1.5,
 ) -> int:
-    """Clear cookie -> Kapat -> every Anladım until the page remains quiet."""
+    """Clear cookie -> enable content check -> every Anladım; never click Kapat."""
     deadline = time.monotonic() + timeout_seconds
     clicks = 0
     stage = "cookie"
     quiet_since = time.monotonic()
-
     while time.monotonic() < deadline:
         if page.is_closed():
             return clicks
         clicked = False
         if stage == "cookie":
             clicked = _click_cookie(page, status)
-            stage = "close"
-        elif stage == "close":
-            clicked = _click_close(page, status)
-            # Even when Kapat is absent, advance to repeated onboarding notices.
+            stage = "enable"
+        elif stage == "enable":
+            clicked = _enable_content_check(page, status)
             stage = "got_it"
         else:
-            # Some TikTok flows show another Kapat between Anladım dialogs.
-            clicked = _click_close(page, status) or _click_got_it(page, status)
-
+            # TikTok may repeat Aç/Anladım onboarding layers.
+            clicked = _enable_content_check(page, status) or _click_got_it(page, status)
         if clicked:
             clicks += 1
             quiet_since = time.monotonic()
