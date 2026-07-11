@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 import app as core
 import network_identity_gui
-from proxy_publisher import ProxyAwareTikTokPublisher
+from proxy_publisher import install_proxy_backend
 
 AYAR_SERVISI = "signaldesk-agency-console.app-settings"
 VARSAYILAN_REDIRECT = "http://127.0.0.1:3455/callback/"
@@ -77,7 +77,7 @@ def ayarlari_yukle() -> None:
 class TurkceAnaPencere(core.MainWindow):
  def __init__(self) -> None:
   super().__init__()
-  self.publisher = ProxyAwareTikTokPublisher(self.registry, self.secrets)
+  install_proxy_backend(self)
 
  def build_ui(self) -> None:
   super().build_ui()
