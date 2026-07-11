@@ -10,38 +10,45 @@ os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
 
 
 def main() -> None:
-    from PySide6.QtWidgets import QApplication
-    import app_tr
-    import publishing_flow_gui
+ from PySide6.QtWidgets import QApplication
+ import app_tr
+ import publishing_flow_gui
 
-    app = QApplication.instance() or QApplication([])
-    window = app_tr.TurkceAnaPencere()
-    try:
-        assert hasattr(window, "guide_profiles_page")
-        assert window.tabs.indexOf(window.guide_profiles_page) >= 0
-        assert window.tabs.tabText(window.tabs.indexOf(window.guide_profiles_page)) == "Guide + Profiller"
-        assert hasattr(window, "publish_guide")
-        assert hasattr(window, "publish_profiles_table")
-        assert window.publish_auto_start.isChecked()
+ app = QApplication.instance() or QApplication([])
+ window = app_tr.TurkceAnaPencere()
+ try:
+  assert hasattr(window, "guide_profiles_page")
+  assert window.tabs.indexOf(window.guide_profiles_page) >= 0
+  assert window.tabs.tabText(window.tabs.indexOf(window.guide_profiles_page)) == "Guide + Profiller"
+  assert hasattr(window, "publish_guide")
+  assert hasattr(window, "publish_profiles_table")
+  assert window.publish_profiles_table.columnCount() == 5
+  assert window.publish_auto_start.isChecked()
+  assert getattr(window, "_publishing_flow_gui_installed", False)
 
-        with tempfile.TemporaryDirectory() as folder:
-            first = Path(folder) / "1.mp4"
-            second = Path(folder) / "2.mp4"
-            first.write_bytes(b"video-1")
-            second.write_bytes(b"video-2")
-            with patch.object(publishing_flow_gui, "profiles", return_value=["A", "B"]), patch.object(
-                publishing_flow_gui, "save_settings", return_value=True
-            ), patch.object(publishing_flow_gui, "start_publish") as start:
-                publishing_flow_gui.distribute_outputs(window, [str(first), str(second)])
-                assert window.pending_assignments == [("A", first.resolve()), ("B", second.resolve())]
-                start.assert_called_once_with(window)
-                assert window.tabs.currentWidget() is window.guide_profiles_page
-    finally:
-        window.close()
-        app.processEvents()
+  with tempfile.TemporaryDirectory() as folder:
+   first = Path(folder) / "1.mp4"
+   second = Path(folder) / "2.mp4"
+   first.write_bytes(b"video-1")
+   second.write_bytes(b"video-2")
+   with patch.object(publishing_flow_gui, "profiles", return_value=["A", "B"]), patch.object(
+    publishing_flow_gui, "save_settings", return_value=True
+   ), patch.object(publishing_flow_gui, "start_publish") as start:
+    publishing_flow_gui.distribute_outputs(window, [str(first), str(second)])
+    assert window.pending_assignments == [("A", first.resolve()), ("B", second.resolve())]
+    assert window.publish_profiles_table.item(0, 1).text() == "A"
+    assert window.publish_profiles_table.item(0, 2).text() == "1.mp4"
+    assert window.publish_profiles_table.item(0, 4).text() == "Atandı"
+    assert "A=1.mp4" in window.publish_status.text()
+    assert "B=2.mp4" in window.publish_status.text()
+    start.assert_called_once_with(window)
+    assert window.tabs.currentWidget() is window.guide_profiles_page
+ finally:
+  window.close()
+  app.processEvents()
 
-    print("OK: Guide + Profiller dağıtımı otomatik yayın akışını başlatıyor")
+ print("OK: app_tr görünür profil dağıtımı ve otomatik yayın akışı doğrulandı")
 
 
 if __name__ == "__main__":
-    main()
+ main()
