@@ -25,6 +25,8 @@ def main() -> int:
         "proxy_health.py",
         "network_identity.py",
         "network_identity_gui.py",
+        "uniquizer_tab.py",
+        "video_variants.py",
     )
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
@@ -49,13 +51,19 @@ def main() -> int:
                 return fail("Çıktı klasörü alanı oluşturulmadı")
             if window.tabs.indexOf(window.network_identity_page) < 0:
                 return fail("Proxy Listesi sekmesi pencereye eklenmedi")
+            if window.uniquizer_tab is None:
+                return fail("Cold Open Uniquizer oluşturulmadı")
+            if window.tabs.indexOf(window.uniquizer_tab) < 0:
+                return fail("Cold Open Uniquizer sekmesi pencereye eklenmedi")
+            if window.tabs.tabText(window.tabs.indexOf(window.uniquizer_tab)) != "Cold Open Uniquizer":
+                return fail("Cold Open Uniquizer sekme adı bozuldu")
         finally:
             window.close()
             app.processEvents()
     except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}")
 
-    print("OK: app_tr gerçek pencere başlangıcı ve Proxy Listesi doğrulandı")
+    print("OK: app_tr, Proxy Listesi ve Cold Open Uniquizer doğrulandı")
     return 0
 
 
