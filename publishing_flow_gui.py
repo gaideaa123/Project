@@ -74,8 +74,8 @@ def save_profile_order(window: Any, names: list[str]) -> None:
  current = registry_profiles(window)
  if set(names) != set(current) or len(names) != len(current):
   raise RuntimeError("Profil sırası güncel hesap listesiyle eşleşmiyor")
- window._publish_profile_order = list(names)
  save_secret(PROFILE_ORDER_KEY, json.dumps(names, ensure_ascii=False))
+ window._publish_profile_order = list(names)
 
 def validated_proxy(profile: str) -> network_identity.NetworkIdentity:
  identity = network_identity.load(profile)
