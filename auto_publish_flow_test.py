@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from unittest.mock import patch
 
 import auto_publish_flow
@@ -119,7 +120,6 @@ class DialogPage:
         self.waits.append(value)
 
 
-
 def main() -> None:
     page = Page([
         "Video yükleniyor 70% İçerik kontrolü sürüyor",
@@ -154,4 +154,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        detail = traceback.format_exc().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error::{detail}")
+        raise
