@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-
-import cv2
-import numpy as np
+from typing import Any
 
 class OriginalityQAError(RuntimeError):
  pass
@@ -19,7 +17,20 @@ class OriginalityReport:
  qr_detected: bool
  signature: tuple[int, ...]
 
-def _dhash(frame: np.ndarray) -> int:
+def _libraries():
+ """Load heavy optional modules only when QA runs, never during GUI import."""
+ try:
+  import cv2
+  import numpy as np
+ except (ImportError, ModuleNotFoundError) as exc:
+  raise OriginalityQAError(
+   "OpenCV/NumPy eksik. SignalDesk'i kapatıp update_project.ps1 çalıştırın "
+   "veya aktif venv ile: python -m pip install -r requirements.txt"
+  ) from exc
+ return cv2, np
+
+def _dhash(frame: Any) -> int:
+ cv2, _ = _libraries()
  gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
  small = cv2.resize(gray, (9, 8), interpolation=cv2.INTER_AREA)
  diff = small[:, 1:] > small[:, :-1]
@@ -38,6 +49,7 @@ def signature_distance(left: tuple[int, ...], right: tuple[int, ...]) -> float:
  return sum(hamming(left[index], right[index]) for index in range(count)) / count
 
 def inspect_video(path: Path, samples: int = 16) -> OriginalityReport:
+ cv2, np = _libraries()
  path = path.expanduser().resolve()
  capture = cv2.VideoCapture(str(path))
  if not capture.isOpened():
@@ -51,10 +63,7 @@ def inspect_video(path: Path, samples: int = 16) -> OriginalityReport:
   detector = cv2.QRCodeDetector()
   positions = np.linspace(0, frame_count - 1, min(samples, frame_count), dtype=int)
   signatures: list[int] = []
-  previous = None
-  static = 0
-  transitions = 0
-  qr_detected = False
+  previous = None; static = 0; transitions = 0; qr_detected = False
   for position in positions:
    capture.set(cv2.CAP_PROP_POS_FRAMES, int(position))
    ok, frame = capture.read()
@@ -79,32 +88,21 @@ def inspect_video(path: Path, samples: int = 16) -> OriginalityReport:
   capture.release()
 
 def assert_source_eligible(path: Path) -> OriginalityReport:
- report = inspect_video(path)
- failures: list[str] = []
- if report.duration < 8.0:
-  failures.append("kaynak video 8 saniyeden kısa")
- if report.sampled_frames < 8:
-  failures.append("yeterli görüntü karesi örneklenemedi")
- if report.static_ratio > 0.70:
-  failures.append("video büyük ölçüde sabit/düşük hareketli")
- if report.qr_detected:
-  failures.append("videoda QR kod algılandı")
- if failures:
-  raise OriginalityQAError("Özgünlük/kalite ön kontrolü başarısız: " + "; ".join(failures))
+ report = inspect_video(path); failures: list[str] = []
+ if report.duration < 8.0: failures.append("kaynak video 8 saniyeden kısa")
+ if report.sampled_frames < 8: failures.append("yeterli görüntü karesi örneklenemedi")
+ if report.static_ratio > 0.70: failures.append("video büyük ölçüde sabit/düşük hareketli")
+ if report.qr_detected: failures.append("videoda QR kod algılandı")
+ if failures: raise OriginalityQAError("Özgünlük/kalite ön kontrolü başarısız: " + "; ".join(failures))
  return report
 
 def assert_output_eligible(path: Path, previous: list[OriginalityReport]) -> OriginalityReport:
  report = inspect_video(path)
- if report.duration < 6.0:
-  raise OriginalityQAError(f"{path.name}: çıktı 6 saniyeden kısa")
- if report.static_ratio > 0.70:
-  raise OriginalityQAError(f"{path.name}: çıktı düşük hareketli")
- if report.qr_detected:
-  raise OriginalityQAError(f"{path.name}: çıktıda QR kod algılandı")
+ if report.duration < 6.0: raise OriginalityQAError(f"{path.name}: çıktı 6 saniyeden kısa")
+ if report.static_ratio > 0.70: raise OriginalityQAError(f"{path.name}: çıktı düşük hareketli")
+ if report.qr_detected: raise OriginalityQAError(f"{path.name}: çıktıda QR kod algılandı")
  for index, other in enumerate(previous, 1):
   distance = signature_distance(report.signature, other.signature)
   if distance < 6.0:
-   raise OriginalityQAError(
-    f"{path.name}: {index}. varyasyondan yeterince farklı değil (görsel mesafe {distance:.1f})"
-   )
+   raise OriginalityQAError(f"{path.name}: {index}. varyasyondan yeterince farklı değil (görsel mesafe {distance:.1f})")
  return report
