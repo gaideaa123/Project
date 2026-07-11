@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-"""Visible, user-confirmed TikTok Studio upload assistant.
-
-This flow never bypasses login, CAPTCHA, 2FA, review, or user confirmation.
-Interaction timing is used for reliable caption entry, not fingerprint hiding.
-"""
-
 import json
 import re
 import threading
@@ -18,20 +12,11 @@ from typing import Callable, Iterable
 from platformdirs import user_data_dir
 from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as PlaywrightTimeout, sync_playwright
 
-from utils.antibot_resilience import InteractionConfig, human_typing_locator
-from utils.network_identity import apply_test_page_defaults
+import publication_guard
 
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center"
 DATA_ROOT = Path(user_data_dir("signaldesk-web-uploader", "SignalDesk"))
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
-CAPTION_INTERACTION = InteractionConfig(
-    min_key_delay_ms=20,
-    max_key_delay_ms=70,
-    pause_probability=0.02,
-    min_pause_ms=100,
-    max_pause_ms=250,
-    timeout_ms=10_000,
-)
 
 
 class WebUploadError(RuntimeError):
@@ -170,11 +155,14 @@ def fill_caption(page: Page, caption: str, cancelled: threading.Event, seconds: 
             raise WebUploadError("İşlem iptal edildi")
         field = first_visible(caption_fields(page), 700)
         if field is not None:
-            try:
-                human_typing_locator(page, field, caption, config=CAPTION_INTERACTION)
-                return
-            except PlaywrightTimeout:
-                pass
+            field.click()
+            tag = str(field.evaluate("el => el.tagName.toLowerCase()"))
+            if tag in {"textarea", "input"}:
+                field.fill(caption)
+            else:
+                page.keyboard.press("Control+A")
+                page.keyboard.insert_text(caption)
+            return
         page.wait_for_timeout(1000)
     raise WebUploadError("Caption alanı 4 dakikada yüklenmedi")
 
@@ -218,33 +206,51 @@ def wait_for_confirmation(confirm: threading.Event, cancelled: threading.Event, 
             raise WebUploadError("İşlem iptal edildi")
 
 
-def click_publish_and_verify(page: Page, button: Locator, status: Callable[[str], None]) -> None:
+def click_publish_and_verify(
+    page: Page,
+    profile_name: str,
+    status: Callable[[str], None],
+) -> None:
+    """Re-check the live page, publish once, and require post-publication evidence."""
+    publication_guard.assert_publishable(page, status)
+
+    button = publish_button(page)
+    if button is None:
+        raise WebUploadError("Yayın düğmesi onaydan sonra kayboldu; sayfa değişmiş olabilir")
+    try:
+        if not button.is_enabled():
+            raise WebUploadError("Yayın düğmesi onaydan sonra devre dışı kaldı")
+    except WebUploadError:
+        raise
+    except Exception as exc:
+        raise WebUploadError("Yayın düğmesinin güncel durumu doğrulanamadı") from exc
+
     status("Yayınla tıklanıyor")
     button.scroll_into_view_if_needed()
     button.click(timeout=10000)
-    success = re.compile(r"uploaded|published|scheduled|posted|yüklendi|yayınlandı|planlandı", re.I)
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        try:
-            if success.search(page.locator("body").inner_text(timeout=1500)):
-                status("TikTok yayını kabul etti")
-                return
-        except Exception:
-            pass
-        if "/upload" not in page.url.lower():
-            status("TikTok yayın ekranından ayrıldı, gönderim kabul edildi")
-            return
-        page.wait_for_timeout(1000)
-    raise WebUploadError("Yayınla tıklandı ancak başarı yanıtı doğrulanamadı; tarayıcıyı kontrol edin")
+
+    try:
+        publication_guard.wait_for_verified_publication(
+            page,
+            profile_name,
+            status=status,
+            timeout_seconds=180,
+        )
+    except RuntimeError as exc:
+        raise WebUploadError(str(exc)) from exc
 
 
-def run_upload(request: WebUploadRequest, confirm: threading.Event, cancelled: threading.Event,
-               status: Callable[[str], None], ready: Callable[[], None]) -> None:
+def run_upload(
+    request: WebUploadRequest,
+    confirm: threading.Event,
+    cancelled: threading.Event,
+    status: Callable[[str], None],
+    ready: Callable[[], None],
+) -> None:
     request.validate()
     with sync_playwright() as playwright:
         context = launch_context(playwright, request.profile_name)
         page = context.pages[0] if context.pages else context.new_page()
-        apply_test_page_defaults(page, timeout_ms=10_000)
         try:
             status("TikTok Studio açılıyor")
             page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=90000)
@@ -253,11 +259,13 @@ def run_upload(request: WebUploadRequest, confirm: threading.Event, cancelled: t
             set_video(page, request.video)
             status("Caption dolduruluyor")
             fill_caption(page, request.caption, cancelled)
-            button = wait_ready(page, cancelled, status)
+            wait_ready(page, cancelled, status)
             page.bring_to_front()
             ready()
             wait_for_confirmation(confirm, cancelled, status)
-            click_publish_and_verify(page, button, status)
+            if cancelled.is_set():
+                raise WebUploadError("İşlem iptal edildi")
+            click_publish_and_verify(page, request.profile_name, status)
         except Exception as exc:
             folder = diagnostics(page, request.profile_name, exc)
             raise WebUploadError(f"{exc}\nTanı klasörü: {folder}") from exc
