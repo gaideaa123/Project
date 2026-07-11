@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-"""Technical preflight and audit for legitimate TikTok publishing.
-
-This module does not attempt to evade recommendation or automation detection.
-It catches concrete causes of failed/zero-distribution posts: invalid streams,
-very short media, unsupported codecs, missing audio, empty captions, and exact
-re-uploads of the same file.
-"""
+"""Technical quality preflight and exact-duplicate publication audit."""
 
 import hashlib
 import json
@@ -40,6 +34,7 @@ class MediaReport:
     has_audio: bool
     audio_codec: str
     size_bytes: int
+    warnings: tuple[str, ...]
 
 
 def _rate(value: str) -> float:
@@ -68,8 +63,8 @@ def inspect_media(path: Path) -> MediaReport:
     result = subprocess.run(
         [ffprobe, "-v", "error", "-show_entries",
          "format=duration:stream=codec_type,codec_name,pix_fmt,width,height,avg_frame_rate",
-         "-of", "json", str(path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+         "-of", "json", str(path)], capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if result.returncode:
         raise PreflightError(result.stderr.strip() or "FFprobe videoyu okuyamadı")
@@ -81,35 +76,26 @@ def inspect_media(path: Path) -> MediaReport:
     audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
     if not video:
         raise PreflightError("Dosyada video stream bulunamadı")
-    report = MediaReport(
-        path=str(path), sha256=file_sha256(path),
-        duration=float(data.get("format", {}).get("duration") or 0),
-        width=int(video.get("width") or 0), height=int(video.get("height") or 0),
-        video_codec=str(video.get("codec_name") or ""),
-        pixel_format=str(video.get("pix_fmt") or ""),
-        frame_rate=_rate(str(video.get("avg_frame_rate") or "0/1")),
-        has_audio=audio is not None,
-        audio_codec=str((audio or {}).get("codec_name") or ""),
-        size_bytes=path.stat().st_size,
+    duration = float(data.get("format", {}).get("duration") or 0)
+    width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+    codec, pixel = str(video.get("codec_name") or ""), str(video.get("pix_fmt") or "")
+    fps = _rate(str(video.get("avg_frame_rate") or "0/1"))
+    hard_errors = []
+    warnings = []
+    if duration < 1.0: hard_errors.append("video 1 saniyeden kısa")
+    if min(width, height) < 720: hard_errors.append("kısa kenar 720 pikselin altında")
+    if codec not in {"h264", "hevc"}: hard_errors.append(f"video codec destek dışı: {codec}")
+    if pixel not in {"yuv420p", "yuvj420p"}: hard_errors.append(f"pixel format riskli: {pixel}")
+    if not 23.0 <= fps <= 61.0: hard_errors.append(f"frame rate riskli: {fps:.2f}")
+    if audio is None: warnings.append("ses stream yok")
+    elif str(audio.get("codec_name") or "") != "aac": warnings.append("audio codec AAC değil")
+    if hard_errors:
+        raise PreflightError("Medya preflight başarısız: " + "; ".join(hard_errors))
+    return MediaReport(
+        str(path), file_sha256(path), duration, width, height, codec, pixel, fps,
+        audio is not None, str((audio or {}).get("codec_name") or ""),
+        path.stat().st_size, tuple(warnings),
     )
-    errors = []
-    if report.duration < 1.0:
-        errors.append("video 1 saniyeden kısa")
-    if report.width < 720 or report.height < 720:
-        errors.append("çözünürlük 720 pikselin altında")
-    if report.video_codec not in {"h264", "hevc"}:
-        errors.append(f"video codec destek dışı: {report.video_codec}")
-    if report.pixel_format not in {"yuv420p", "yuvj420p"}:
-        errors.append(f"pixel format riskli: {report.pixel_format}")
-    if not 23.0 <= report.frame_rate <= 61.0:
-        errors.append(f"frame rate riskli: {report.frame_rate:.2f}")
-    if not report.has_audio:
-        errors.append("ses stream yok")
-    elif report.audio_codec != "aac":
-        errors.append(f"audio codec AAC değil: {report.audio_codec}")
-    if errors:
-        raise PreflightError("Medya preflight başarısız: " + "; ".join(errors))
-    return report
 
 
 def _load_audit() -> list[dict]:
@@ -123,8 +109,7 @@ def _load_audit() -> list[dict]:
 def validate(profile: str, video: Path, caption: str) -> MediaReport:
     if not profile.strip():
         raise PreflightError("Profil adı boş")
-    caption = caption.strip()
-    if not caption or len(caption) > 2200:
+    if not caption.strip() or len(caption.strip()) > 2200:
         raise PreflightError("Caption boş veya 2200 karakterden uzun")
     report = inspect_media(video)
     cutoff = datetime.now(UTC) - timedelta(days=30)
@@ -133,20 +118,19 @@ def validate(profile: str, video: Path, caption: str) -> MediaReport:
             created = datetime.fromisoformat(str(item.get("created_at", "")).replace("Z", "+00:00"))
         except ValueError:
             continue
-        if created >= cutoff and item.get("sha256") == report.sha256:
-            raise PreflightError(
-                "Aynı video dosyası son 30 gün içinde zaten yayınlanmış; exact tekrar gönderim durduruldu"
-            )
+        if (created >= cutoff and item.get("profile") == profile
+                and item.get("sha256") == report.sha256):
+            raise PreflightError("Aynı dosya bu profilde son 30 gün içinde zaten yayınlanmış")
     return report
 
 
 def record(profile: str, report: MediaReport, result: str = "published") -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     items = _load_audit()
-    items.append({
-        **asdict(report), "profile": profile, "result": result,
-        "created_at": datetime.now(UTC).isoformat(),
-    })
+    payload = asdict(report)
+    payload["warnings"] = list(report.warnings)
+    items.append({**payload, "profile": profile, "result": result,
+                  "created_at": datetime.now(UTC).isoformat()})
     temporary = AUDIT_FILE.with_suffix(".tmp")
     temporary.write_text(json.dumps(items[-1000:], ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(AUDIT_FILE)
