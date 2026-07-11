@@ -4,16 +4,25 @@ from post_publish_outcome import is_published_review_notice
 
 
 def main() -> None:
- assert is_published_review_notice(RuntimeError(
-  "Gönderi yayınlandı ancak erişim riski görüldü: inceleniyor"
- ))
- assert is_published_review_notice(RuntimeError(
-  "Gönderi yayınlandı ancak erişim riski görüldü: incelemede"
- ))
- assert not is_published_review_notice(RuntimeError("Gönderi yayınlanamadı: inceleniyor"))
- assert not is_published_review_notice(RuntimeError("Erişim riski görüldü: kısıtlı"))
- assert not is_published_review_notice(RuntimeError("TikTok yayın hatası gösterdi"))
- print("OK: yalnız yayınlanmış inceleniyor durumu başarı sayılıyor")
+ accepted = (
+  "Gönderi yayınlandı ancak erişim riski görüldü: inceleniyor",
+  "Gönderi başarıyla yayınlandı, ancak erişim riski görüldü: incelemede",
+  "Video paylaşıldı ancak erişim riski görüldü:\nunder review",
+ )
+ for message in accepted:
+  assert is_published_review_notice(RuntimeError(message)), message
+
+ rejected = (
+  "Gönderi yayınlanamadı: inceleniyor",
+  "Erişim riski görüldü: kısıtlı",
+  "Gönderi hazırlanıyor ancak erişim riski görüldü: inceleniyor",
+  "TikTok yayın hatası gösterdi",
+  "Hesap kısıtlandı",
+ )
+ for message in rejected:
+  assert not is_published_review_notice(RuntimeError(message)), message
+
+ print("OK: yalnız kesin yayın + inceleme sonucu sıradaki hesaba geçiriliyor")
 
 
 if __name__ == "__main__":
