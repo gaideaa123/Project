@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-"""Profile-scoped TikTok session, onboarding, and publish-dialog assistance."""
+"""Profile-scoped TikTok web publishing with persistent session bootstrap.
+
+A saved sessionid may bootstrap an empty persistent Chrome profile once. After
+TikTok establishes its normal first-party browser state, later runs reuse that
+profile and do not overwrite the session cookie on every upload. Automatic final
+Publish remains enabled after the application's explicit GUI approval.
+"""
 
 import re
 import threading
@@ -105,27 +111,63 @@ def file_input_ready(page) -> bool:
         return False
 
 
+def _existing_session_cookie(context) -> str:
+    """Read only the existing TikTok session from this persistent profile."""
+    try:
+        for cookie in context.cookies(["https://www.tiktok.com"]):
+            if cookie.get("name") in {"sessionid", "sessionid_ss"} and cookie.get("value"):
+                return str(cookie["value"])
+    except PlaywrightError:
+        pass
+    return ""
+
+
+def bootstrap_session(context, profile: str) -> bool:
+    """Inject sessionid only when the persistent profile has no TikTok session.
+
+    Returns True when a bootstrap cookie was added, False when Chrome already had
+    a session or no saved sessionid exists. TikTok remains responsible for adding
+    its CSRF/device cookies during the first navigation.
+    """
+    if _existing_session_cookie(context):
+        return False
+    session_id = load_session(profile)
+    if not session_id:
+        return False
+    context.add_cookies([{
+        "name": "sessionid",
+        "value": session_id,
+        "domain": ".tiktok.com",
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Lax",
+    }])
+    return True
+
+
 def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=""):
     deadline = time.monotonic() + timeout_seconds
-    identity, password = load_credentials(profile)
-    attempted = False
+    login_reported = False
     last_navigation = 0.0
     while time.monotonic() < deadline:
         if page.is_closed():
             raise LoginError("TikTok penceresi kapatıldı")
         if file_input_ready(page):
             if status:
-                status("TikTok oturumu doğrulandı; upload hazır")
+                status("Kalıcı Chrome profili doğrulandı; upload ekranı hazır")
             return
         url = page.url.lower()
         now = time.monotonic()
         if "/login" in url or _visible(page.locator('input[type="password"]')):
-            if identity and password and not attempted:
-                attempted = True
-                if status:
-                    status("Session geçersiz; kayıtlı hesapla görünür giriş gerekiyor")
-                page.bring_to_front()
-                page.wait_for_timeout(1000)
+            if not login_reported and status:
+                status(
+                    f"{profile}: kayıtlı Session ID geçersiz veya TikTok ek doğrulama istiyor; "
+                    "Chrome içinde normal girişi tamamlayın"
+                )
+            login_reported = True
+            page.bring_to_front()
+            page.wait_for_timeout(750)
             continue
         if "tiktokstudio/upload" not in url and now - last_navigation > 4:
             try:
@@ -135,7 +177,22 @@ def wait_for_upload_after_login(page, timeout_seconds=900, status=None, profile=
             last_navigation = now
             continue
         page.wait_for_timeout(750)
-    raise LoginError("TikTok session/giriş doğrulaması tamamlanmadı")
+    raise LoginError("TikTok session/giriş/upload ekranı 15 dakikada hazır olmadı")
+
+
+def _native_caption_write(field, caption: str) -> None:
+    """Use Playwright input actions; never dispatch JavaScript DOM events."""
+    field.scroll_into_view_if_needed(timeout=3000)
+    field.click(timeout=3000)
+    tag = str(field.evaluate("el => el.tagName.toLowerCase()"))
+    if tag in {"input", "textarea"}:
+        field.fill("")
+        field.press_sequentially(caption, delay=8)
+    else:
+        field.press("ControlOrMeta+A")
+        field.press("Backspace")
+        field.press_sequentially(caption, delay=8)
+    field.press("Tab")
 
 
 def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool:
@@ -143,11 +200,11 @@ def handle_copyright_publish_dialog(page, timeout_seconds: float = 20.0) -> bool
 
 
 def install(web_uploader: Any):
-    """Install once; serialize temporary module-level wrappers per profile."""
     with _INSTALL_LOCK:
         if getattr(web_uploader, "_signaldesk_login_installed", False):
             preflight_hook.install(web_uploader)
             return
+
         original_launch = web_uploader.launch_context
         original_prepare = web_uploader.prepare_upload
         original_confirm = web_uploader.confirm_publish_dialog
@@ -156,12 +213,8 @@ def install(web_uploader: Any):
 
         def launch(playwright, profile):
             context = original_launch(playwright, profile)
-            session_id = load_session(profile)
-            if session_id:
-                context.add_cookies([{
-                    "name": "sessionid", "value": session_id, "domain": ".tiktok.com",
-                    "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
-                }])
+            bootstrapped = bootstrap_session(context, profile)
+            setattr(context, "_signaldesk_session_bootstrapped", bootstrapped)
             return context
 
         def confirm_for_every_profile(page):
@@ -183,11 +236,10 @@ def install(web_uploader: Any):
             return result
 
         def prepare(request, publish=False, approval=None, status=None):
-            # app_tr is sequential today. The lock also prevents accidental future
-            # parallel calls from exchanging profile-specific waiter functions.
             with _INSTALL_LOCK:
                 original_wait = web_uploader.wait_for_upload_after_login
                 previous_confirm = web_uploader.confirm_publish_dialog
+                previous_writer = web_uploader._write_caption
 
                 def waiter(page, timeout_seconds=900, status=None):
                     result = wait_for_upload_after_login(
@@ -200,8 +252,12 @@ def install(web_uploader: Any):
 
                 web_uploader.wait_for_upload_after_login = waiter
                 web_uploader.confirm_publish_dialog = confirm_for_every_profile
+                web_uploader._write_caption = _native_caption_write
                 if status:
-                    status(f"{request.profile}: içerik kontrolü açık, telif onayı etkin")
+                    status(
+                        f"{request.profile}: kalıcı profil + gerektiğinde tek seferlik Session ID bootstrap; "
+                        "GUI onayından sonra Yayınla otomatik tıklanacak"
+                    )
                 try:
                     return original_prepare(
                         request, publish=publish, approval=approval, status=status
@@ -209,10 +265,13 @@ def install(web_uploader: Any):
                 finally:
                     web_uploader.wait_for_upload_after_login = original_wait
                     web_uploader.confirm_publish_dialog = previous_confirm
+                    web_uploader._write_caption = previous_writer
 
         web_uploader.launch_context = launch
         web_uploader.confirm_publish_dialog = confirm_for_every_profile
         web_uploader.dismiss_pre_caption_notice = dismiss_pre_caption_notice
+        web_uploader._write_caption = _native_caption_write
         web_uploader.prepare_upload = prepare
         web_uploader._signaldesk_login_installed = True
+        web_uploader._signaldesk_automatic_publish = True
         preflight_hook.install(web_uploader)

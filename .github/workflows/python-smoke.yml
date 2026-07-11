@@ -21,7 +21,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall -q .
       - run: python runtime_contract_smoke.py
-      - run: python editorial_variants_smoke.py
+      - run: python assisted_mode_smoke.py
       - run: python smoke_test.py
       - run: python preflight_smoke.py
       - run: python media_qa_smoke.py
