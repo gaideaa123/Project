@@ -1,16 +1,28 @@
+# Python
 __pycache__/
 *.py[cod]
-.venv/
-venv/
-.env
-*.log
-*.bak
-multi_account_registry.json
-*-renditions/
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
 dist/
 build/
-*.spec
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Local app data / secrets
+secrets.json
+accounts.json
+studio.log
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
-Thumbs.db
-.qa-state/
-qa-artifacts/
