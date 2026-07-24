@@ -808,8 +808,14 @@ class MainWindow(QMainWindow):
             QLabel#eyebrow { color:#71d49a; font-size:11px; font-weight:700; letter-spacing:2px; }
             QLabel#title { font-size:28px; font-weight:700; } QLabel#section { font-size:18px; font-weight:700; }
             QLabel#muted { color:#98a29c; } QLabel#pill { background:#20372a; color:#8ee0ac; padding:7px 13px; border-radius:12px; font-weight:700; }
-            QLineEdit,QComboBox,QDateTimeEdit,QSpinBox { background:#111512; border:1px solid #344039; border-radius:7px; padding:9px; min-height:20px; }
-            QLineEdit:focus,QComboBox:focus,QDateTimeEdit:focus { border:1px solid #71d49a; }
+            QLineEdit,QDateTimeEdit,QSpinBox { background:#111512; border:1px solid #344039; border-radius:7px; padding:9px; min-height:20px; }
+            QLineEdit:focus,QDateTimeEdit:focus { border:1px solid #71d49a; }
+            QComboBox { background:#111512; border:1px solid #344039; border-radius:7px; padding:9px 32px 9px 9px; min-height:20px; }
+            QComboBox:focus { border:1px solid #71d49a; }
+            QComboBox:hover { border:1px solid #5a7a6a; }
+            QComboBox::drop-down { subcontrol-origin:padding; subcontrol-position:top right; width:28px; border-left:1px solid #344039; border-radius:0 7px 7px 0; background:#1e2521; }
+            QComboBox::down-arrow { width:10px; height:10px; border-left:2px solid #71d49a; border-bottom:2px solid #71d49a; }
+            QComboBox QAbstractItemView { background:#151a18; border:1px solid #344039; border-radius:6px; selection-background-color:#20372a; selection-color:#e7ece8; color:#e7ece8; outline:0; }
             QPushButton { background:#252d28; border:1px solid #39463e; border-radius:7px; padding:9px 14px; min-height:20px; }
             QPushButton:hover { background:#2d3831; } QPushButton:pressed { background:#1d2520; }
             QPushButton#primary { background:#71d49a; color:#102016; border:0; font-weight:700; }
